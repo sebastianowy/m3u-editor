@@ -87,7 +87,7 @@ class XtreamService
             $user_agent = $this->playlist?->user_agent ?? 'VLC/3.0.21 LibVLC/3.0.21';
             $verify = !($this->playlist?->disable_ssl_verification ?? false);
             $response = Http::timeout($timeout) // defaults to 15 minutes
-                ->withOptions(['verify' => $verify])
+                ->withOptions(['verify' => $verify, 'version'=>'1.1'])
                 ->withHeaders(['User-Agent' => $user_agent])
                 ->get($url);
 

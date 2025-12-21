@@ -119,18 +119,18 @@ class ProcessEpgImport implements ShouldQueue
             if ($epg->source_type === EpgSourceType::SCHEDULES_DIRECT) {
                 if (!$epg->hasSchedulesDirectCredentials()) {
                     // Log the exception
-                    logger()->error("Error processing \"{$this->epg->name}\"");
+                    logger()->error("Error processing EPG \"{$this->epg->name}\"");
 
                     // Send notification
                     $error = "Invalid Schedules Direct credentials. Unable to get results from the API. Please check the credentials and try again.";
                     Notification::make()
                         ->danger()
-                        ->title("Error processing \"{$this->epg->name}\"")
+                        ->title("Error processing EPG \"{$this->epg->name}\"")
                         ->body('Please view your notifications for details.')
                         ->broadcast($this->epg->user);
                     Notification::make()
                         ->danger()
-                        ->title("Error processing \"{$this->epg->name}\"")
+                        ->title("Error processing EPG \"{$this->epg->name}\"")
                         ->body($error)
                         ->sendToDatabase($this->epg->user);
 
@@ -243,18 +243,18 @@ class ProcessEpgImport implements ShouldQueue
                 $channelReader->open('compress.zlib://' . $filePath);
             } else {
                 // Log the exception
-                logger()->error("Error processing \"{$this->epg->name}\"");
+                logger()->error("Error processing EPG \"{$this->epg->name}\"");
 
                 // Send notification
                 $error = "Invalid EPG file. Unable to read or download your EPG file. Please check the URL or uploaded file and try again.";
                 Notification::make()
                     ->danger()
-                    ->title("Error processing \"{$this->epg->name}\"")
+                    ->title("Error processing EPG \"{$this->epg->name}\"")
                     ->body('Please view your notifications for details.')
                     ->broadcast($this->epg->user);
                 Notification::make()
                     ->danger()
-                    ->title("Error processing \"{$this->epg->name}\"")
+                    ->title("Error processing EPG \"{$this->epg->name}\"")
                     ->body($error)
                     ->sendToDatabase($this->epg->user);
 
@@ -396,15 +396,15 @@ class ProcessEpgImport implements ShouldQueue
                     ->onConnection('redis') // force to use redis connection
                     ->onQueue('import')
                     ->catch(function (Throwable $e) use ($epg) {
-                        $error = "Error processing \"{$epg->name}\": {$e->getMessage()}";
+                        $error = "Error processing EPG \"{$epg->name}\": {$e->getMessage()}";
                         Notification::make()
                             ->danger()
-                            ->title("Error processing \"{$epg->name}\"")
+                            ->title("Error processing EPG \"{$epg->name}\"")
                             ->body('Please view your notifications for details.')
                             ->broadcast($epg->user);
                         Notification::make()
                             ->danger()
-                            ->title("Error processing \"{$epg->name}\"")
+                            ->title("Error processing EPG \"{$epg->name}\"")
                             ->body($error)
                             ->sendToDatabase($epg->user);
                         $epg->update([
@@ -420,18 +420,18 @@ class ProcessEpgImport implements ShouldQueue
                     })->dispatch();
             } else {
                 // Log the exception
-                logger()->error("Error processing \"{$this->epg->name}\"");
+                logger()->error("Error processing EPG \"{$this->epg->name}\"");
 
                 // Send notification
                 $error = "Invalid EPG file. Unable to read or download your EPG file. Please check the URL or uploaded file and try again.";
                 Notification::make()
                     ->danger()
-                    ->title("Error processing \"{$this->epg->name}\"")
+                    ->title("Error processing EPG \"{$this->epg->name}\"")
                     ->body('Please view your notifications for details.')
                     ->broadcast($this->epg->user);
                 Notification::make()
                     ->danger()
-                    ->title("Error processing \"{$this->epg->name}\"")
+                    ->title("Error processing EPG \"{$this->epg->name}\"")
                     ->body($error)
                     ->sendToDatabase($this->epg->user);
 
@@ -451,17 +451,17 @@ class ProcessEpgImport implements ShouldQueue
             }
         } catch (Exception $e) {
             // Log the exception
-            logger()->error("Error processing \"{$this->epg->name}\": {$e->getMessage()}");
+            logger()->error("Error processing EPG \"{$this->epg->name}\": {$e->getMessage()}");
 
             // Send notification
             Notification::make()
                 ->danger()
-                ->title("Error processing \"{$this->epg->name}\"")
+                ->title("Error processing EPG \"{$this->epg->name}\"")
                 ->body('Please view your notifications for details.')
                 ->broadcast($this->epg->user);
             Notification::make()
                 ->danger()
-                ->title("Error processing \"{$this->epg->name}\"")
+                ->title("Error processing EPG \"{$this->epg->name}\"")
                 ->body($e->getMessage())
                 ->sendToDatabase($this->epg->user);
 

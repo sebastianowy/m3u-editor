@@ -172,17 +172,17 @@ class ProcessM3uImport implements ShouldQueue
     private function sendError($message, $error): void
     {
         // Log the exception
-        logger()->error("Error processing \"{$this->playlist->name}\": $error");
+        logger()->error("Error processing M3uImport \"{$this->playlist->name}\": $error");
 
         // Send notification
         Notification::make()
             ->danger()
-            ->title("Error processing \"{$this->playlist->name}\"")
+            ->title("Error processing M3uImport \"{$this->playlist->name}\"")
             ->body($message)
             ->broadcast($this->playlist->user);
         Notification::make()
             ->danger()
-            ->title("Error processing \"{$this->playlist->name}\"")
+            ->title("Error processing M3uImport \"{$this->playlist->name}\"")
             ->body($message)
             ->sendToDatabase($this->playlist->user);
 
@@ -339,7 +339,7 @@ class ProcessM3uImport implements ShouldQueue
             // If including Series streams, get the categories and streams
             if ($seriesStreamsEnabled) {
                 $seriesCategoriesResponse = $this->withProviderThrottling(fn() => Http::withUserAgent($userAgent)
-                    ->withOptions(['verify' => $verify])
+                    ->withOptions(['verify' => $verify, 'version'=>'1.1'])
                     ->timeout(60) // set timeout to one minute
                     ->throw()->get($seriesCategories));
                 if (!$seriesCategoriesResponse->ok()) {
@@ -526,17 +526,17 @@ class ProcessM3uImport implements ShouldQueue
             );
         } catch (Exception $e) {
             // Log the exception
-            logger()->error("Error processing \"{$this->playlist->name}\": {$e->getMessage()}");
+            logger()->error("Error processing M3uImport \"{$this->playlist->name}\": {$e->getMessage()}");
 
             // Send notification
             Notification::make()
                 ->danger()
-                ->title("Error processing \"{$this->playlist->name}\"")
+                ->title("Error processing M3uImport \"{$this->playlist->name}\"")
                 ->body('Please view your notifications for details.')
                 ->broadcast($this->playlist->user);
             Notification::make()
                 ->danger()
-                ->title("Error processing \"{$this->playlist->name}\"")
+                ->title("Error processing M3uImport \"{$this->playlist->name}\"")
                 ->body($e->getMessage())
                 ->sendToDatabase($this->playlist->user);
 
@@ -831,18 +831,18 @@ class ProcessM3uImport implements ShouldQueue
                 $this->processChannelCollection($collection, $playlist, $batchNo, $userId, $start);
             } else {
                 // Log the exception
-                logger()->error("Error processing \"{$playlist->name}\"");
+                logger()->error("Error processing M3uImport \"{$playlist->name}\"");
 
                 // Send notification
                 $error = "Invalid playlist file. Unable to read or download your playlist file. Please check the URL or uploaded file and try again.";
                 Notification::make()
                     ->danger()
-                    ->title("Error processing \"{$playlist->name}\"")
+                    ->title("Error processing M3uImport \"{$playlist->name}\"")
                     ->body('Please view your notifications for details.')
                     ->broadcast($playlist->user);
                 Notification::make()
                     ->danger()
-                    ->title("Error processing \"{$playlist->name}\"")
+                    ->title("Error processing M3uImport \"{$playlist->name}\"")
                     ->body($error)
                     ->sendToDatabase($playlist->user);
 
@@ -866,17 +866,17 @@ class ProcessM3uImport implements ShouldQueue
             }
         } catch (Exception $e) {
             // Log the exception
-            logger()->error("Error processing \"{$this->playlist->name}\": {$e->getMessage()}");
+            logger()->error("Error processing M3uImport \"{$this->playlist->name}\": {$e->getMessage()}");
 
             // Send notification
             Notification::make()
                 ->danger()
-                ->title("Error processing \"{$this->playlist->name}\"")
+                ->title("Error processing M3uImport \"{$this->playlist->name}\"")
                 ->body('Please view your notifications for details.')
                 ->broadcast($this->playlist->user);
             Notification::make()
                 ->danger()
-                ->title("Error processing \"{$this->playlist->name}\"")
+                ->title("Error processing M3uImport \"{$this->playlist->name}\"")
                 ->body($e->getMessage())
                 ->sendToDatabase($this->playlist->user);
 
@@ -1262,16 +1262,16 @@ class ProcessM3uImport implements ShouldQueue
             ->onConnection('redis') // force to use redis connection
             ->onQueue('import')
             ->catch(function (Throwable $e) use ($playlist) {
-                $error = "Error processing \"{$playlist->name}\": {$e->getMessage()}";
+                $error = "Error processing M3uImport \"{$playlist->name}\": {$e->getMessage()}";
                 Log::error($error);
                 Notification::make()
                     ->danger()
-                    ->title("Error processing \"{$playlist->name}\"")
+                    ->title("Error processing M3uImport \"{$playlist->name}\"")
                     ->body('Please view your notifications for details.')
                     ->broadcast($playlist->user);
                 Notification::make()
                     ->danger()
-                    ->title("Error processing \"{$playlist->name}\"")
+                    ->title("Error processing M3uImport \"{$playlist->name}\"")
                     ->body($error)
                     ->sendToDatabase($playlist->user);
                 $playlist->update([
@@ -1475,16 +1475,16 @@ class ProcessM3uImport implements ShouldQueue
             ->onConnection('redis') // force to use redis connection
             ->onQueue('import')
             ->catch(function (Throwable $e) use ($playlist) {
-                $error = "Error processing \"{$playlist->name}\": {$e->getMessage()}";
+                $error = "Error processing M3uImport \"{$playlist->name}\": {$e->getMessage()}";
                 Log::error($error);
                 Notification::make()
                     ->danger()
-                    ->title("Error processing \"{$playlist->name}\"")
+                    ->title("Error processing M3uImport \"{$playlist->name}\"")
                     ->body('Please view your notifications for details.')
                     ->broadcast($playlist->user);
                 Notification::make()
                     ->danger()
-                    ->title("Error processing \"{$playlist->name}\"")
+                    ->title("Error processing M3uImport \"{$playlist->name}\"")
                     ->body($error)
                     ->sendToDatabase($playlist->user);
                 $playlist->update([
