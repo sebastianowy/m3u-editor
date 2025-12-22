@@ -268,7 +268,7 @@ class ProcessM3uImport implements ShouldQueue
                     ->throw()->get($liveCategories));
                 if (!$categoriesResponse->ok()) {
                     $error = $categoriesResponse->body();
-                    $message = "Error processing Live categories: $error";
+                    $message = "Error processing Live categories: $error, url: $liveCategories";
                     $this->sendError($message, $error);
                     return;
                 }
@@ -291,7 +291,7 @@ class ProcessM3uImport implements ShouldQueue
                     ->throw()->get($liveStreamsUrl));
                 if (!$liveResponse->ok()) {
                     $error = $liveResponse->body();
-                    $message = "Error processing Live streams: $error";
+                    $message = "Error processing Live streams: $error, url: $liveStreamsUrl";
                     $this->sendError($message, $error);
                     return;
                 }
@@ -306,7 +306,7 @@ class ProcessM3uImport implements ShouldQueue
                     ->throw()->get($vodCategories));
                 if (!$vodCategoriesResponse->ok()) {
                     $error = $vodCategoriesResponse->body();
-                    $message = "Error processing VOD categories: $error";
+                    $message = "Error processing VOD categories: $error, url: $vodCategories";
                     $this->sendError($message, $error);
                     return;
                 }
@@ -329,7 +329,7 @@ class ProcessM3uImport implements ShouldQueue
                     ->throw()->get($vodStreamsUrl));
                 if (!$vodResponse->ok()) {
                     $error = $vodResponse->body();
-                    $message = "Error processing VOD streams: $error";
+                    $message = "Error processing VOD streams: $error, url: $vodStreamsUrl";
                     $this->sendError($message, $error);
                     return;
                 }
@@ -344,7 +344,7 @@ class ProcessM3uImport implements ShouldQueue
                     ->throw()->get($seriesCategories));
                 if (!$seriesCategoriesResponse->ok()) {
                     $error = $seriesCategoriesResponse->body();
-                    $message = "Error processing Series categories: $error";
+                    $message = "Error processing Series categories: $error, url: $seriesCategories";
                     $this->sendError($message, $error);
                     return;
                 }
@@ -526,7 +526,7 @@ class ProcessM3uImport implements ShouldQueue
             );
         } catch (Exception $e) {
             // Log the exception
-            logger()->error("Error processing M3uImport \"{$this->playlist->name}\": {$e->getMessage()}");
+            logger()->error("Error processing M3uImport \"{$this->playlist->name}\": {$e->getMessage()}, trace: {$e->getTraceAsString()}");
 
             // Send notification
             Notification::make()
@@ -537,7 +537,7 @@ class ProcessM3uImport implements ShouldQueue
             Notification::make()
                 ->danger()
                 ->title("Error processing M3uImport \"{$this->playlist->name}\"")
-                ->body($e->getMessage())
+                ->body("{$e->getMessage()}, trace: {$e->getTraceAsString()}")
                 ->sendToDatabase($this->playlist->user);
 
             // Update the playlist
@@ -866,7 +866,7 @@ class ProcessM3uImport implements ShouldQueue
             }
         } catch (Exception $e) {
             // Log the exception
-            logger()->error("Error processing M3uImport \"{$this->playlist->name}\": {$e->getMessage()}");
+            logger()->error("Error processing M3uImport \"{$this->playlist->name}\": {$e->getMessage()}, trace: {$e->getTraceAsString()}");
 
             // Send notification
             Notification::make()
@@ -877,7 +877,7 @@ class ProcessM3uImport implements ShouldQueue
             Notification::make()
                 ->danger()
                 ->title("Error processing M3uImport \"{$this->playlist->name}\"")
-                ->body($e->getMessage())
+                ->body("{$e->getMessage()}, trace: {$e->getTraceAsString()}")
                 ->sendToDatabase($this->playlist->user);
 
             // Update the playlist
@@ -1262,7 +1262,7 @@ class ProcessM3uImport implements ShouldQueue
             ->onConnection('redis') // force to use redis connection
             ->onQueue('import')
             ->catch(function (Throwable $e) use ($playlist) {
-                $error = "Error processing M3uImport \"{$playlist->name}\": {$e->getMessage()}";
+                $error = "Error processing M3uImport \"{$playlist->name}\": {$e->getMessage()}, trace: {$e->getTraceAsString()}";
                 Log::error($error);
                 Notification::make()
                     ->danger()
@@ -1475,7 +1475,7 @@ class ProcessM3uImport implements ShouldQueue
             ->onConnection('redis') // force to use redis connection
             ->onQueue('import')
             ->catch(function (Throwable $e) use ($playlist) {
-                $error = "Error processing M3uImport \"{$playlist->name}\": {$e->getMessage()}";
+                $error = "Error processing M3uImport \"{$playlist->name}\": {$e->getMessage()}, trace: {$e->getTraceAsString()}";
                 Log::error($error);
                 Notification::make()
                     ->danger()
