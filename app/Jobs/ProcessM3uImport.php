@@ -167,22 +167,23 @@ class ProcessM3uImport implements ShouldQueue
     /**
      * @param string $message
      * @param string $error
+     * @param string $url
      * @return void
      */
-    private function sendError($message, $error): void
+    private function sendError($message, $error, $url): void
     {
         // Log the exception
-        logger()->error("Error processing M3uImport \"{$this->playlist->name}\": $error");
+        logger()->error("Error processing M3uImport \"{$this->playlist->name}\" \"{$url}\": $error");
 
         // Send notification
         Notification::make()
             ->danger()
-            ->title("Error processing M3uImport \"{$this->playlist->name}\"")
+            ->title("Error processing M3uImport \"{$this->playlist->name}\" \"{$url}\"")
             ->body($message)
             ->broadcast($this->playlist->user);
         Notification::make()
             ->danger()
-            ->title("Error processing M3uImport \"{$this->playlist->name}\"")
+            ->title("Error processing M3uImport \"{$this->playlist->name}\" \"{$url}\"")
             ->body($message)
             ->sendToDatabase($this->playlist->user);
 
@@ -268,8 +269,8 @@ class ProcessM3uImport implements ShouldQueue
                     ->throw()->get($liveCategories));
                 if (!$categoriesResponse->ok()) {
                     $error = $categoriesResponse->body();
-                    $message = "Error processing Live categories: $error, url: $liveCategories";
-                    $this->sendError($message, $error);
+                    $message = "Error processing Live categories: $error";
+                    $this->sendError($message, $error, $liveCategories);
                     return;
                 }
                 $liveCategories = collect($categoriesResponse->json());
@@ -291,8 +292,8 @@ class ProcessM3uImport implements ShouldQueue
                     ->throw()->get($liveStreamsUrl));
                 if (!$liveResponse->ok()) {
                     $error = $liveResponse->body();
-                    $message = "Error processing Live streams: $error, url: $liveStreamsUrl";
-                    $this->sendError($message, $error);
+                    $message = "Error processing Live streams: $error";
+                    $this->sendError($message, $error, $liveStreamsUrl);
                     return;
                 }
                 $playlist->update(attributes: ['progress' => 5]);
@@ -306,8 +307,8 @@ class ProcessM3uImport implements ShouldQueue
                     ->throw()->get($vodCategories));
                 if (!$vodCategoriesResponse->ok()) {
                     $error = $vodCategoriesResponse->body();
-                    $message = "Error processing VOD categories: $error, url: $vodCategories";
-                    $this->sendError($message, $error);
+                    $message = "Error processing VOD categories: $error";
+                    $this->sendError($message, $error, $vodCategories);
                     return;
                 }
                 $vodCategories = collect($vodCategoriesResponse->json());
@@ -329,8 +330,8 @@ class ProcessM3uImport implements ShouldQueue
                     ->throw()->get($vodStreamsUrl));
                 if (!$vodResponse->ok()) {
                     $error = $vodResponse->body();
-                    $message = "Error processing VOD streams: $error, url: $vodStreamsUrl";
-                    $this->sendError($message, $error);
+                    $message = "Error processing VOD streams: $error";
+                    $this->sendError($message, $error, $vodStreamsUrl);
                     return;
                 }
                 $playlist->update(attributes: ['vod_progress' => 5]);
@@ -344,8 +345,8 @@ class ProcessM3uImport implements ShouldQueue
                     ->throw()->get($seriesCategories));
                 if (!$seriesCategoriesResponse->ok()) {
                     $error = $seriesCategoriesResponse->body();
-                    $message = "Error processing Series categories: $error, url: $seriesCategories";
-                    $this->sendError($message, $error);
+                    $message = "Error processing Series categories: $error";
+                    $this->sendError($message, $error, $seriesCategories);
                     return;
                 }
                 $seriesCategories = collect($seriesCategoriesResponse->json());
