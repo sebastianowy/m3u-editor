@@ -36,6 +36,9 @@ class ProcessM3uImport implements ShouldQueue
     use Queueable;
     use ProviderRequestDelay;
 
+    public $failedSteps = 0;
+    public $failedableSteps = 0;
+
     // Don't retry the job on failure
     public $tries = 1;
 
@@ -177,34 +180,48 @@ class ProcessM3uImport implements ShouldQueue
 
         // Send notification
         Notification::make()
-            ->danger()
+            ->warning()
             ->title("Error processing M3uImport \"{$this->playlist->name}\" \"{$url}\"")
             ->body($message)
             ->broadcast($this->playlist->user);
         Notification::make()
-            ->danger()
+            ->warning()
             ->title("Error processing M3uImport \"{$this->playlist->name}\" \"{$url}\"")
             ->body($message)
             ->sendToDatabase($this->playlist->user);
 
-        // Update the playlist
-        $this->playlist->update([
-            'status' => Status::Failed,
-            'synced' => now(),
-            'errors' => $error,
-            'progress' => 0,
-            'vod_progress' => 0,
-            'series_progress' => 0,
-            'processing' => [
-                ...$this->playlist->processing ?? [],
-                'live_processing' => false,
-                'vod_processing' => false,
-                'series_processing' => false,
-            ]
-        ]);
+        if ($this->failedSteps >= $this->failedableSteps) {
+            // Send notification
+            Notification::make()
+                ->error()
+                ->title("Error processing M3uImport \"{$this->playlist->name}\"")
+                ->body('All steps failed, please check your notifications for details.')
+                ->broadcast($this->playlist->user);
+            Notification::make()
+                ->error()
+                ->title("Error processing M3uImport \"{$this->playlist->name}\"")
+                ->body('All steps failed, please check your notifications for details.')
+                ->sendToDatabase($this->playlist->user);
 
-        // Fire the playlist synced event
-        event(new SyncCompleted($this->playlist));
+            // Update the playlist
+            $this->playlist->update([
+                'status' => Status::Failed,
+                'synced' => now(),
+                'errors' => $error,
+                'progress' => 0,
+                'vod_progress' => 0,
+                'series_progress' => 0,
+                'processing' => [
+                    ...$this->playlist->processing ?? [],
+                    'live_processing' => false,
+                    'vod_processing' => false,
+                    'series_processing' => false,
+                ]
+            ]);
+
+            // Fire the playlist synced event
+            event(new SyncCompleted($this->playlist));
+        }
     }
 
     /**
@@ -261,6 +278,18 @@ class ProcessM3uImport implements ShouldQueue
                 ]);
             }
 
+            $this->failedSteps = 0;
+            $this->failedableSteps = 0;
+            if($liveStreamsEnabled) {
+                $this->failedableSteps += 2;
+            }
+            if($vodStreamsEnabled) {
+                $this->failedableSteps += 2;
+            }
+            if($seriesStreamsEnabled) {
+                $this->failedableSteps += 1;
+            }
+            
             // If including Live streams, get the categories and streams
             if ($liveStreamsEnabled) {
                 $categoriesResponse = $this->withProviderThrottling(fn() => Http::withUserAgent($userAgent)
@@ -270,33 +299,35 @@ class ProcessM3uImport implements ShouldQueue
                 if (!$categoriesResponse->ok()) {
                     $error = $categoriesResponse->body();
                     $message = "Error processing Live categories: $error";
+                    $this->failedSteps++;
                     $this->sendError($message, $error, $liveCategories);
-                    return;
-                }
-                $liveCategories = collect($categoriesResponse->json());
+                } else {
+                    $liveCategories = collect($categoriesResponse->json());
 
-                // Get the live streams and save to a file
-                $liveFp = Storage::disk('local')->path("{$playlist->folder_path}/live_streams.json");
+                    // Get the live streams and save to a file
+                    $liveFp = Storage::disk('local')->path("{$playlist->folder_path}/live_streams.json");
 
-                // Make sure the folder exists
-                Storage::disk('local')->makeDirectory($playlist->folder_path, 0755, true);
+                    // Make sure the folder exists
+                    Storage::disk('local')->makeDirectory($playlist->folder_path, 0755, true);
 
-                // Delete the file if it already exists so we can start fresh
-                if (Storage::disk('local')->exists($liveFp)) {
-                    Storage::disk('local')->delete($liveFp);
+                    // Delete the file if it already exists so we can start fresh
+                    if (Storage::disk('local')->exists($liveFp)) {
+                        Storage::disk('local')->delete($liveFp);
+                    }
+                    $liveResponse = $this->withProviderThrottling(fn() => Http::withUserAgent($userAgent)
+                        ->sink($liveFp) // Save the response to a file for later processing
+                        ->withOptions(['verify' => $verify])
+                        ->timeout(60 * 5)
+                        ->throw()->get($liveStreamsUrl));
+                    if (!$liveResponse->ok()) {
+                        $error = $liveResponse->body();
+                        $message = "Error processing Live streams: $error";
+                        $this->failedSteps++;
+                        $this->sendError($message, $error, $liveStreamsUrl);
+                    } else {
+                        $playlist->update(attributes: ['progress' => 5]);
+                    }
                 }
-                $liveResponse = $this->withProviderThrottling(fn() => Http::withUserAgent($userAgent)
-                    ->sink($liveFp) // Save the response to a file for later processing
-                    ->withOptions(['verify' => $verify])
-                    ->timeout(60 * 5)
-                    ->throw()->get($liveStreamsUrl));
-                if (!$liveResponse->ok()) {
-                    $error = $liveResponse->body();
-                    $message = "Error processing Live streams: $error";
-                    $this->sendError($message, $error, $liveStreamsUrl);
-                    return;
-                }
-                $playlist->update(attributes: ['progress' => 5]);
             }
 
             // If including VOD, get the categories and streams
@@ -308,33 +339,35 @@ class ProcessM3uImport implements ShouldQueue
                 if (!$vodCategoriesResponse->ok()) {
                     $error = $vodCategoriesResponse->body();
                     $message = "Error processing VOD categories: $error";
+                    $this->failedSteps++;
                     $this->sendError($message, $error, $vodCategories);
-                    return;
-                }
-                $vodCategories = collect($vodCategoriesResponse->json());
+                } else {
+                    $vodCategories = collect($vodCategoriesResponse->json());
 
-                // Get the VOD streams and save to a file
-                $vodFp = Storage::disk('local')->path("{$playlist->folder_path}/vod_streams.json");
+                    // Get the VOD streams and save to a file
+                    $vodFp = Storage::disk('local')->path("{$playlist->folder_path}/vod_streams.json");
 
-                // Make sure the folder exists
-                Storage::disk('local')->makeDirectory($playlist->folder_path, 0755, true);
+                    // Make sure the folder exists
+                    Storage::disk('local')->makeDirectory($playlist->folder_path, 0755, true);
 
-                // Delete the file if it already exists so we can start fresh
-                if (Storage::disk('local')->exists($vodFp)) {
-                    Storage::disk('local')->delete($vodFp);
+                    // Delete the file if it already exists so we can start fresh
+                    if (Storage::disk('local')->exists($vodFp)) {
+                        Storage::disk('local')->delete($vodFp);
+                    }
+                    $vodResponse = $this->withProviderThrottling(fn() => Http::withUserAgent($userAgent)
+                        ->sink($vodFp) // Save the response to a file for later processing
+                        ->withOptions(['verify' => $verify])
+                        ->timeout(60 * 5)
+                        ->throw()->get($vodStreamsUrl));
+                    if (!$vodResponse->ok()) {
+                        $error = $vodResponse->body();
+                        $message = "Error processing VOD streams: $error";
+                        $this->failedSteps++;
+                        $this->sendError($message, $error, $vodStreamsUrl);
+                    } else {
+                        $playlist->update(attributes: ['vod_progress' => 5]);
+                    }
                 }
-                $vodResponse = $this->withProviderThrottling(fn() => Http::withUserAgent($userAgent)
-                    ->sink($vodFp) // Save the response to a file for later processing
-                    ->withOptions(['verify' => $verify])
-                    ->timeout(60 * 5)
-                    ->throw()->get($vodStreamsUrl));
-                if (!$vodResponse->ok()) {
-                    $error = $vodResponse->body();
-                    $message = "Error processing VOD streams: $error";
-                    $this->sendError($message, $error, $vodStreamsUrl);
-                    return;
-                }
-                $playlist->update(attributes: ['vod_progress' => 5]);
             }
 
             // If including Series streams, get the categories and streams
@@ -346,10 +379,11 @@ class ProcessM3uImport implements ShouldQueue
                 if (!$seriesCategoriesResponse->ok()) {
                     $error = $seriesCategoriesResponse->body();
                     $message = "Error processing Series categories: $error";
+                    $this->failedSteps++;
                     $this->sendError($message, $error, $seriesCategories);
-                    return;
+                } else {
+                    $seriesCategories = collect($seriesCategoriesResponse->json());
                 }
-                $seriesCategories = collect($seriesCategoriesResponse->json());
             } else {
                 $seriesCategories = null;
             }
