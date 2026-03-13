@@ -13,7 +13,6 @@ use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\BelongsToMany;
 use Illuminate\Database\Eloquent\Relations\HasMany;
-use Illuminate\Foundation\Bus\Chain;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
 use Spatie\Tags\HasTags;
@@ -280,7 +279,7 @@ class Series extends Model
                 }
 
                 if (count($jobs) > 0) {
-                    DB::afterCommit(function ($jobs) use ($jobs) {
+                    DB::afterCommit(function() use ($jobs) {
                         Bus::chain($jobs)->dispatch();
                     });
                 }
