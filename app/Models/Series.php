@@ -13,7 +13,7 @@ use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\BelongsToMany;
 use Illuminate\Database\Eloquent\Relations\HasMany;
-use Illuminate\Bus\Chain;
+use Illuminate\Support\Facades\Bus;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
 use Spatie\Tags\HasTags;
@@ -278,7 +278,7 @@ class Series extends Model
                 }
 
                 if (count($jobs) > 0) {
-                    dispatch(new Chain($jobs))->afterCommit();
+                    dispatch(Bus::chain($jobs))->afterCommit();
                 }
 
                 return $episodeCount;
