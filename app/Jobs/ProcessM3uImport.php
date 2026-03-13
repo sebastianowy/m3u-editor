@@ -381,58 +381,60 @@ class ProcessM3uImport implements ShouldQueue
                     // Make sure the folder exists
                     Storage::disk('local')->makeDirectory($playlist->folder_path, 0755, true);
 
-                // Delete the file if it already exists so we can start fresh
-                if (Storage::disk('local')->exists($liveFp)) {
-                    Storage::disk('local')->delete($liveFp);
-                }
-
-                // Only fetch the streams if not pre-processing, otherwise we'll fetch them later after we determine what groups to include
-                if (! $preProcessingLive) {
-                    if ($this->importViaCategory) {
-                        // Build a single-pass generator: fetch each category and yield items directly,
-                        // avoiding the need to write and then re-read an intermediate merged file.
-                        $liveStreams = (function () use ($liveCategories, $liveStreamsUrl, $userAgent, $verify) {
-                            foreach ($liveCategories as $category) {
-                                $categoryId = $category['category_id'];
-                                $categoryName = $category['category_name'];
-                                if ($this->preprocess && ! $this->shouldIncludeChannel($categoryName)) {
-                                    continue;
-                                }
-                                $tempFp = tempnam(sys_get_temp_dir(), 'live_cat_');
-                                try {
-                                    $this->withProviderThrottling(fn () => Http::withUserAgent($userAgent)
-                                        ->sink($tempFp)
-                                        ->withOptions(['verify' => $verify])
-                                        ->timeout(60) // set timeout to one minute per category
-                                        ->throw()->get("$liveStreamsUrl&category_id=$categoryId"));
-                                    foreach (Items::fromFile($tempFp) as $item) {
-                                        yield $item;
-                                    }
-                                } finally {
-                                    @unlink($tempFp);
-                                }
-                            }
-                        })();
-                    } else {
-                        $liveResponse = $this->withProviderThrottling(fn () => Http::withUserAgent($userAgent)
-                            ->sink($liveFp) // Save the response to a file for later processing
-                            ->withOptions(['verify' => $verify])
-                            ->timeout(60 * 5) // set timeout to five minutes
-                            ->throw()->get($liveStreamsUrl));
-                        if (! $liveResponse->ok()) {
-                            $error = $liveResponse->body();
-                            $message = "Error processing Live streams: $error";
-                            $this->failedSteps++;
-                            $this->sendError($message, $error, $liveStreamsUrl);
-
-                            return;
-                        }
+                    // Delete the file if it already exists so we can start fresh
+                    if (Storage::disk('local')->exists($liveFp)) {
+                        Storage::disk('local')->delete($liveFp);
                     }
-                    $playlist->update(attributes: ['progress' => 5]);
-                } else {
-                    $liveFp = null; // we'll fetch the streams later after we determine what groups to include
+
+                    // Only fetch the streams if not pre-processing, otherwise we'll fetch them later after we determine what groups to include
+                    if (! $preProcessingLive) {
+                        if ($this->importViaCategory) {
+                            // Build a single-pass generator: fetch each category and yield items directly,
+                            // avoiding the need to write and then re-read an intermediate merged file.
+                            $liveStreams = (function () use ($liveCategories, $liveStreamsUrl, $userAgent, $verify) {
+                                foreach ($liveCategories as $category) {
+                                    $categoryId = $category['category_id'];
+                                    $categoryName = $category['category_name'];
+                                    if ($this->preprocess && ! $this->shouldIncludeChannel($categoryName)) {
+                                        continue;
+                                    }
+                                    $tempFp = tempnam(sys_get_temp_dir(), 'live_cat_');
+                                    try {
+                                        $this->withProviderThrottling(fn () => Http::withUserAgent($userAgent)
+                                            ->sink($tempFp)
+                                            ->withOptions(['verify' => $verify])
+                                            ->timeout(60) // set timeout to one minute per category
+                                            ->throw()->get("$liveStreamsUrl&category_id=$categoryId"));
+                                        foreach (Items::fromFile($tempFp) as $item) {
+                                            yield $item;
+                                        }
+                                    } finally {
+                                        @unlink($tempFp);
+                                    }
+                                }
+                            })();
+                        } else {
+                            $liveResponse = $this->withProviderThrottling(fn () => Http::withUserAgent($userAgent)
+                                ->sink($liveFp) // Save the response to a file for later processing
+                                ->withOptions(['verify' => $verify])
+                                ->timeout(60 * 5) // set timeout to five minutes
+                                ->throw()->get($liveStreamsUrl));
+                            if (! $liveResponse->ok()) {
+                                $error = $liveResponse->body();
+                                $message = "Error processing Live streams: $error";
+                                $this->failedSteps++;
+                                $this->sendError($message, $error, $liveStreamsUrl);
+
+                                return;
+                            }
+                        }
+                        $playlist->update(attributes: ['progress' => 5]);
+                    } else {
+                        $liveFp = null; // we'll fetch the streams later after we determine what groups to include
+                    }
                 }
             }
+
 
             // If including VOD, get the categories and streams
             if ($vodStreamsEnabled) {
@@ -445,7 +447,6 @@ class ProcessM3uImport implements ShouldQueue
                     $message = "Error processing VOD categories: $error";
                     $this->failedSteps++;
                     $this->sendError($message, $error, $vodCategories);
-
                 } else {
                     $vodCategories = collect($vodCategoriesResponse->json());
 
@@ -455,56 +456,57 @@ class ProcessM3uImport implements ShouldQueue
                     // Make sure the folder exists
                     Storage::disk('local')->makeDirectory($playlist->folder_path, 0755, true);
 
-                // Delete the file if it already exists so we can start fresh
-                if (Storage::disk('local')->exists($vodFp)) {
-                    Storage::disk('local')->delete($vodFp);
-                }
-
-                // Only fetch the streams if not pre-processing, otherwise we'll fetch them later after we determine what groups to include
-                if (! $preProcessingVod) {
-                    if ($this->importViaCategory) {
-                        // Build a single-pass generator: fetch each category and yield items directly,
-                        // avoiding the need to write and then re-read an intermediate merged file.
-                        $vodStreams = (function () use ($vodCategories, $vodStreamsUrl, $userAgent, $verify) {
-                            foreach ($vodCategories as $category) {
-                                $categoryId = $category['category_id'];
-                                $categoryName = $category['category_name'];
-                                if ($this->preprocess && ! $this->shouldIncludeVod($categoryName)) {
-                                    continue;
-                                }
-                                $tempFp = tempnam(sys_get_temp_dir(), 'vod_cat_');
-                                try {
-                                    $this->withProviderThrottling(fn () => Http::withUserAgent($userAgent)
-                                        ->sink($tempFp)
-                                        ->withOptions(['verify' => $verify])
-                                        ->timeout(60) // set timeout to one minute per category
-                                        ->throw()->get("$vodStreamsUrl&category_id=$categoryId"));
-                                    foreach (Items::fromFile($tempFp) as $item) {
-                                        yield $item;
-                                    }
-                                } finally {
-                                    @unlink($tempFp);
-                                }
-                            }
-                        })();
-                    } else {
-                        $vodResponse = $this->withProviderThrottling(fn () => Http::withUserAgent($userAgent)
-                            ->sink($vodFp) // Save the response to a file for later processing
-                            ->withOptions(['verify' => $verify])
-                            ->timeout(60 * 5)
-                            ->throw()->get($vodStreamsUrl));
-                        if (! $vodResponse->ok()) {
-                            $error = $vodResponse->body();
-                            $message = "Error processing VOD streams: $error";
-                            $this->failedSteps++;
-                            $this->sendError($message, $error, $vodStreamsUrl);
-
-                            return;
-                        }
+                    // Delete the file if it already exists so we can start fresh
+                    if (Storage::disk('local')->exists($vodFp)) {
+                        Storage::disk('local')->delete($vodFp);
                     }
-                    $playlist->update(attributes: ['vod_progress' => 5]);
-                } else {
-                    $vodFp = null; // we'll fetch the streams later after we determine what groups to include
+
+                    // Only fetch the streams if not pre-processing, otherwise we'll fetch them later after we determine what groups to include
+                    if (! $preProcessingVod) {
+                        if ($this->importViaCategory) {
+                            // Build a single-pass generator: fetch each category and yield items directly,
+                            // avoiding the need to write and then re-read an intermediate merged file.
+                            $vodStreams = (function () use ($vodCategories, $vodStreamsUrl, $userAgent, $verify) {
+                                foreach ($vodCategories as $category) {
+                                    $categoryId = $category['category_id'];
+                                    $categoryName = $category['category_name'];
+                                    if ($this->preprocess && ! $this->shouldIncludeVod($categoryName)) {
+                                        continue;
+                                    }
+                                    $tempFp = tempnam(sys_get_temp_dir(), 'vod_cat_');
+                                    try {
+                                        $this->withProviderThrottling(fn () => Http::withUserAgent($userAgent)
+                                            ->sink($tempFp)
+                                            ->withOptions(['verify' => $verify])
+                                            ->timeout(60) // set timeout to one minute per category
+                                            ->throw()->get("$vodStreamsUrl&category_id=$categoryId"));
+                                        foreach (Items::fromFile($tempFp) as $item) {
+                                            yield $item;
+                                        }
+                                    } finally {
+                                        @unlink($tempFp);
+                                    }
+                                }
+                            })();
+                        } else {
+                            $vodResponse = $this->withProviderThrottling(fn () => Http::withUserAgent($userAgent)
+                                ->sink($vodFp) // Save the response to a file for later processing
+                                ->withOptions(['verify' => $verify])
+                                ->timeout(60 * 5)
+                                ->throw()->get($vodStreamsUrl));
+                            if (! $vodResponse->ok()) {
+                                $error = $vodResponse->body();
+                                $message = "Error processing VOD streams: $error";
+                                $this->failedSteps++;
+                                $this->sendError($message, $error, $vodStreamsUrl);
+
+                                return;
+                            }
+                        }
+                        $playlist->update(attributes: ['vod_progress' => 5]);
+                    } else {
+                        $vodFp = null; // we'll fetch the streams later after we determine what groups to include
+                    }
                 }
             }
 
