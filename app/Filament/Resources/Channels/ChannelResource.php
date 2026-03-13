@@ -2,71 +2,67 @@
 
 namespace App\Filament\Resources\Channels;
 
-use Filament\Schemas\Schema;
-use Filament\Tables\Enums\RecordActionsPosition;
-use Filament\Tables\Columns\ImageColumn;
-use Filament\Tables\Columns\TextColumn;
-use Filament\Tables\Columns\TextInputColumn;
-use Filament\Tables\Columns\ToggleColumn;
-use Filament\Tables\Columns\SelectColumn;
-use Filament\Tables\Filters\SelectFilter;
-use Filament\Tables\Filters\Filter;
-use Filament\Actions\ActionGroup;
-use Filament\Actions\EditAction;
-use Filament\Schemas\Components\Grid;
-use Filament\Actions\DeleteAction;
-use Filament\Actions\ViewAction;
-use Filament\Actions\BulkActionGroup;
-use Filament\Actions\BulkAction;
-use Filament\Forms\Components\Select;
-use Filament\Schemas\Components\Utilities\Set;
-use Filament\Schemas\Components\Utilities\Get;
-use App\Jobs\MapPlaylistChannelsToEpg;
-use Filament\Forms\Components\ToggleButtons;
-use Filament\Forms\Components\Toggle;
-use Filament\Forms\Components\TextInput;
-use App\Jobs\ChannelFindAndReplace;
-use App\Jobs\ChannelFindAndReplaceReset;
-use App\Filament\Resources\Channels\Pages\ListChannels;
-use Filament\Schemas\Components\Section;
-use Filament\Infolists\Components\TextEntry;
-use Filament\Infolists\Components\IconEntry;
-use Filament\Schemas\Components\Fieldset;
-use Filament\Forms\Components\Hidden;
-use Exception;
-use Filament\Forms\Components\Repeater;
-use Illuminate\Validation\ValidationException;
-use Illuminate\Database\Eloquent\ModelNotFoundException;
-use Illuminate\Database\QueryException;
-use App\Enums\ChannelLogoType;
 use App\Facades\LogoFacade;
 use App\Facades\ProxyFacade;
+use App\Facades\SortFacade;
 use App\Filament\Resources\ChannelResource\Pages;
-use App\Filament\Resources\ChannelResource\RelationManagers;
+use App\Filament\Resources\Channels\Pages\ListChannels;
 use App\Filament\Resources\EpgMaps\EpgMapResource;
+use App\Jobs\ChannelFindAndReplace;
+use App\Jobs\ChannelFindAndReplaceReset;
+use App\Jobs\MapPlaylistChannelsToEpg;
 use App\Models\Channel;
 use App\Models\ChannelFailover;
 use App\Models\CustomPlaylist;
-use App\Models\Epg;
 use App\Models\Group;
 use App\Models\Playlist;
+use App\Services\EpgCacheService;
+use App\Services\LogoCacheService;
+use App\Services\PlaylistService;
+use App\Traits\HasUserFiltering;
+use Exception;
 use Filament\Actions\Action;
-use Filament\Forms;
-use Illuminate\Support\HtmlString;
+use Filament\Actions\ActionGroup;
+use Filament\Actions\BulkAction;
+use Filament\Actions\BulkActionGroup;
+use Filament\Actions\DeleteAction;
+use Filament\Actions\EditAction;
+use Filament\Actions\ViewAction;
+use Filament\Forms\Components\Hidden;
+use Filament\Forms\Components\Repeater;
+use Filament\Forms\Components\Select;
+use Filament\Forms\Components\TextInput;
+use Filament\Forms\Components\Toggle;
+use Filament\Forms\Components\ToggleButtons;
+use Filament\Infolists\Components\IconEntry;
+use Filament\Infolists\Components\TextEntry;
 use Filament\Notifications\Notification;
 use Filament\Resources\Resource;
-use Filament\Infolists;
-use Filament\Tables;
+use Filament\Schemas\Components\Fieldset;
+use Filament\Schemas\Components\Grid;
+use Filament\Schemas\Components\Section;
+use Filament\Schemas\Components\Utilities\Get;
+use Filament\Schemas\Components\Utilities\Set;
+use Filament\Schemas\Schema;
+use Filament\Support\Enums\Width;
+use Filament\Tables\Columns\ImageColumn;
+use Filament\Tables\Columns\SelectColumn;
+use Filament\Tables\Columns\TextColumn;
+use Filament\Tables\Columns\TextInputColumn;
+use Filament\Tables\Columns\ToggleColumn;
+use Filament\Tables\Enums\RecordActionsPosition;
+use Filament\Tables\Filters\Filter;
+use Filament\Tables\Filters\SelectFilter;
 use Filament\Tables\Table;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Collection;
-use Illuminate\Support\Facades\Auth;
-use Illuminate\Support\Facades\DB;
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\ModelNotFoundException;
+use Illuminate\Database\QueryException;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\HtmlString;
 use Illuminate\Support\Str;
-use Spatie\Tags\Tag;
-use App\Traits\HasUserFiltering;
-use Filament\Support\Enums\Width;
+use Illuminate\Validation\ValidationException;
 
 class ChannelResource extends Resource
 {
@@ -87,7 +83,7 @@ class ChannelResource extends Resource
             ->where('is_vod', false);
 
         // Filter by user_id for non-admin users
-        if (auth()->check() && !auth()->user()->isAdmin()) {
+        if (auth()->check() && ! auth()->user()->isAdmin()) {
             $query->where('user_id', auth()->id());
         }
 
@@ -100,14 +96,14 @@ class ChannelResource extends Resource
             ->where('is_vod', false);
 
         // Filter by user_id for non-admin users
-        if (auth()->check() && !auth()->user()->isAdmin()) {
+        if (auth()->check() && ! auth()->user()->isAdmin()) {
             $query->where('user_id', auth()->id());
         }
 
         return $query;
     }
 
-    protected static string | \UnitEnum | null $navigationGroup = 'Live Channels';
+    protected static string|\UnitEnum|null $navigationGroup = 'Live Channels';
 
     protected static ?string $navigationLabel = 'Channels';
 
@@ -147,8 +143,8 @@ class ChannelResource extends Resource
             ->deferLoading()
             ->paginated([10, 25, 50, 100])
             ->defaultPaginationPageOption(25)
-            ->columns(self::getTableColumns(showGroup: !$relationId, showPlaylist: !$relationId))
-            ->filters(self::getTableFilters(showPlaylist: !$relationId))
+            ->columns(self::getTableColumns(showGroup: ! $relationId, showPlaylist: ! $relationId))
+            ->filters(self::getTableFilters(showPlaylist: ! $relationId))
             ->recordActions(self::getTableActions(), position: RecordActionsPosition::BeforeCells)
             ->toolbarActions(self::getTableBulkActions());
     }
@@ -160,10 +156,10 @@ class ChannelResource extends Resource
                 ->label('Logo')
                 ->checkFileExistence(false)
                 ->size('inherit', 'inherit')
-                ->extraImgAttributes(fn($record): array => [
+                ->extraImgAttributes(fn ($record): array => [
                     'style' => 'height:2.5rem; width:auto; border-radius:4px;', // Live channel style
                 ])
-                ->getStateUsing(fn($record) => LogoFacade::getChannelLogoUrl($record))
+                ->getStateUsing(fn ($record) => LogoFacade::getChannelLogoUrl($record))
                 ->toggleable(),
             TextColumn::make('info')
                 ->label('Info')
@@ -181,6 +177,7 @@ class ChannelResource extends Resource
                         $description = Str::limit($info['description'] ?? $info['plot'] ?? '', 200);
                         $html .= "<p class='text-sm text-gray-500 dark:text-gray-400 whitespace-normal mt-2'>{$description}</p>";
                     }
+
                     return new HtmlString($html);
                 })
                 ->extraAttributes(['style' => 'min-width: 350px;'])
@@ -191,11 +188,16 @@ class ChannelResource extends Resource
                 ->type('number')
                 ->placeholder('Sort Order')
                 ->sortable()
-                ->tooltip(fn($record) => !$record->is_custom && $record->playlist?->auto_sort ? 'Playlist auto-sort enabled; any changes will be overwritten on next sync' : 'Channel sort order')
+                ->tooltip(fn ($record) => ! $record->is_custom && $record->playlist?->auto_sort ? 'Playlist auto-sort enabled; any changes will be overwritten on next sync' : 'Channel sort order')
                 ->toggleable(),
             ToggleColumn::make('enabled')
                 ->toggleable()
                 ->tooltip('Toggle channel status')
+                ->sortable(),
+            ToggleColumn::make('can_merge')
+                ->label('Merge Enabled')
+                ->toggleable()
+                ->tooltip('Toggle channel merge status during "Merge Same ID" jobs')
                 ->sortable(),
             TextColumn::make('failovers_count')
                 ->label('Failovers')
@@ -206,8 +208,8 @@ class ChannelResource extends Resource
             TextInputColumn::make('stream_id_custom')
                 ->label('ID')
                 ->rules(['min:0', 'max:255'])
-                ->tooltip(fn($record) => $record->stream_id)
-                ->placeholder(fn($record) => $record->stream_id)
+                ->tooltip(fn ($record) => $record->stream_id)
+                ->placeholder(fn ($record) => $record->stream_id)
                 ->searchable()
                 ->sortable(query: function (Builder $query, string $direction): Builder {
                     return $query
@@ -218,8 +220,8 @@ class ChannelResource extends Resource
             TextInputColumn::make('title_custom')
                 ->label('Title')
                 ->rules(['min:0', 'max:255'])
-                ->tooltip(fn($record) => $record->title)
-                ->placeholder(fn($record) => $record->title)
+                ->tooltip(fn ($record) => $record->title)
+                ->placeholder(fn ($record) => $record->title)
                 ->searchable()
                 ->sortable(query: function (Builder $query, string $direction): Builder {
                     return $query
@@ -230,10 +232,10 @@ class ChannelResource extends Resource
             TextInputColumn::make('name_custom')
                 ->label('Name')
                 ->rules(['min:0', 'max:255'])
-                ->tooltip(fn($record) => $record->name)
-                ->placeholder(fn($record) => $record->name)
+                ->tooltip(fn ($record) => $record->name)
+                ->placeholder(fn ($record) => $record->name)
                 ->searchable(query: function (Builder $query, string $search): Builder {
-                    return $query->orWhereRaw('LOWER(channels.name_custom) LIKE ?', ['%' . strtolower($search) . '%']);
+                    return $query->orWhereRaw('LOWER(channels.name_custom) LIKE ?', ['%'.strtolower($search).'%']);
                 })
                 ->sortable(query: function (Builder $query, string $direction): Builder {
                     return $query
@@ -253,7 +255,7 @@ class ChannelResource extends Resource
                 ->rules(['url'])
                 ->type('url')
                 ->tooltip('Channel url')
-                ->placeholder(fn($record) => $record->url)
+                ->placeholder(fn ($record) => $record->url)
                 ->searchable()
                 ->toggleable(),
             TextInputColumn::make('shift')
@@ -265,7 +267,7 @@ class ChannelResource extends Resource
                 ->toggleable()
                 ->sortable(),
             TextColumn::make('group')
-                ->hidden(fn() => !$showGroup)
+                ->hidden(fn () => ! $showGroup)
                 ->badge()
                 ->toggleable()
                 ->searchable(query: function ($query, string $search): Builder {
@@ -285,12 +287,15 @@ class ChannelResource extends Resource
                     }
                 })
                 ->sortable(),
+            ToggleColumn::make('epg_map_enabled')
+                ->label('Mapping Enabled')
+                ->sortable(),
             TextColumn::make('epgChannel.name')
                 ->label('EPG Channel')
                 ->toggleable()
                 ->searchable(query: function (Builder $query, string $search): Builder {
                     return $query->orWhereHas('epgChannel', function (Builder $query) use ($search) {
-                        $query->whereRaw('LOWER(epg_channels.name) LIKE ?', ['%' . strtolower($search) . '%']);
+                        $query->whereRaw('LOWER(epg_channels.name) LIKE ?', ['%'.strtolower($search).'%']);
                     });
                 })
                 ->limit(40)
@@ -320,7 +325,7 @@ class ChannelResource extends Resource
                 ->toggleable(isToggledHiddenByDefault: true)
                 ->sortable(),
             TextColumn::make('playlist.name')
-                ->hidden(fn() => !$showPlaylist)
+                ->hidden(fn () => ! $showPlaylist)
                 ->numeric()
                 ->toggleable()
                 ->sortable(),
@@ -339,13 +344,15 @@ class ChannelResource extends Resource
                 ->label('Default Name')
                 ->sortable()
                 ->searchable(query: function (Builder $query, string $search): Builder {
-                    return $query->orWhereRaw('LOWER(channels.name) LIKE ?', ['%' . strtolower($search) . '%']);
+                    return $query->orWhereRaw('LOWER(channels.name) LIKE ?', ['%'.strtolower($search).'%']);
                 })
                 ->toggleable(isToggledHiddenByDefault: true),
             TextColumn::make('url')
                 ->label('Default URL')
                 ->sortable()
-                ->searchable()
+                ->searchable(query: function (Builder $query, string $search): Builder {
+                    return $query->orWhereRaw('LOWER(channels.url::text) LIKE ?', ['%'.strtolower($search).'%']);
+                })
                 ->toggleable(isToggledHiddenByDefault: true),
 
             TextColumn::make('created_at')
@@ -364,7 +371,7 @@ class ChannelResource extends Resource
         return [
             SelectFilter::make('playlist')
                 ->relationship('playlist', 'name')
-                ->hidden(fn() => !$showPlaylist)
+                ->hidden(fn () => ! $showPlaylist)
                 ->multiple()
                 ->preload()
                 ->searchable(),
@@ -401,24 +408,28 @@ class ChannelResource extends Resource
             ActionGroup::make([
                 EditAction::make('edit_custom')
                     ->slideOver()
-                    ->schema(fn(EditAction $action): array => [
+                    ->schema(fn (EditAction $action): array => [
                         Grid::make()
                             ->schema(self::getForm(edit: true))
-                            ->columns(2)
-                    ]),
-                DeleteAction::make()->hidden(fn(Model $record) => !$record->is_custom),
-            ])->button()->hiddenLabel()->size('sm')->hidden(fn(Model $record) => !$record->is_custom),
+                            ->columns(2),
+                    ])
+                    // Refresh table after edit to remove records that no longer match active filters
+                    ->after(fn ($livewire) => $livewire->dispatch('$refresh')),
+                DeleteAction::make()->hidden(fn (Model $record) => ! $record->is_custom),
+            ])->button()->hiddenLabel()->size('sm')->hidden(fn (Model $record) => ! $record->is_custom),
             EditAction::make('edit')
                 ->slideOver()
-                ->schema(fn(EditAction $action): array => [
+                ->schema(fn (EditAction $action): array => [
                     Grid::make()
                         ->schema(self::getForm(edit: true))
-                        ->columns(2)
+                        ->columns(2),
                 ])
+                // Refresh table after edit to remove records that no longer match active filters
+                ->after(fn ($livewire) => $livewire->dispatch('$refresh'))
                 ->button()
                 ->hiddenLabel()
-                ->disabled(fn(Model $record) => $record->is_custom)
-                ->hidden(fn(Model $record) => $record->is_custom),
+                ->disabled(fn (Model $record) => $record->is_custom)
+                ->hidden(fn (Model $record) => $record->is_custom),
             Action::make('play')
                 ->tooltip('Play Channel')
                 ->action(function ($record, $livewire) {
@@ -436,63 +447,12 @@ class ChannelResource extends Resource
         ];
     }
 
-    public static function getTableBulkActions($addToCustom = true): array
+    public static function getTableBulkActions($addToCustom = true, bool $includeRecount = true): array
     {
         return [
             BulkActionGroup::make([
-                BulkAction::make('add')
-                    ->label('Add to Custom Playlist')
-                    ->schema([
-                        Select::make('playlist')
-                            ->required()
-                            ->live()
-                            ->label('Custom Playlist')
-                            ->helperText('Select the custom playlist you would like to add the selected channel(s) to.')
-                            ->options(CustomPlaylist::where(['user_id' => auth()->id()])->get(['name', 'id'])->pluck('name', 'id'))
-                            ->afterStateUpdated(function (Set $set, $state) {
-                                if ($state) {
-                                    $set('category', null);
-                                }
-                            })
-                            ->searchable(),
-                        Select::make('category')
-                            ->label('Custom Group')
-                            ->disabled(fn(Get $get) => !$get('playlist'))
-                            ->helperText(fn(Get $get) => !$get('playlist') ? 'Select a custom playlist first.' : 'Select the group you would like to assign to the selected channel(s) to.')
-                            ->options(function ($get) {
-                                $customList = CustomPlaylist::find($get('playlist'));
-                                return $customList ? $customList->groupTags()->get()
-                                    ->mapWithKeys(fn($tag) => [$tag->getAttributeValue('name') => $tag->getAttributeValue('name')])
-                                    ->toArray() : [];
-                            })
-                            ->searchable(),
-                    ])
-                    ->action(function (Collection $records, array $data): void {
-                        $playlist = CustomPlaylist::findOrFail($data['playlist']);
-                        $playlist->channels()->syncWithoutDetaching($records->pluck('id'));
-                        if ($data['category']) {
-                            $tags = $playlist->groupTags()->get();
-                            $tag = $playlist->groupTags()->where('name->en', $data['category'])->first();
-                            foreach ($records as $record) {
-                                // Need to detach any existing tags from this playlist first
-                                $record->detachTags($tags);
-                                $record->attachTag($tag);
-                            }
-                        }
-                    })->after(function () {
-                        Notification::make()
-                            ->success()
-                            ->title('Channels added to custom playlist')
-                            ->body('The selected channels have been added to the chosen custom playlist.')
-                            ->send();
-                    })
-                    ->hidden(fn() => !$addToCustom)
-                    ->deselectRecordsAfterCompletion()
-                    ->requiresConfirmation()
-                    ->icon('heroicon-o-play')
-                    ->modalIcon('heroicon-o-play')
-                    ->modalDescription('Add the selected channel(s) to the chosen custom playlist.')
-                    ->modalSubmitActionLabel('Add now'),
+                PlaylistService::getAddToPlaylistBulkAction('add', 'channel')
+                    ->hidden(fn () => ! $addToCustom),
                 BulkAction::make('move')
                     ->label('Move to Group')
                     ->schema([
@@ -510,14 +470,14 @@ class ChannelResource extends Resource
                             ->required()
                             ->live()
                             ->label('Group')
-                            ->helperText(fn(Get $get) => $get('playlist') === null ? 'Select a playlist first...' : 'Select the group you would like to move the items to.')
-                            ->options(fn(Get $get) => Group::where([
+                            ->helperText(fn (Get $get) => $get('playlist') === null ? 'Select a playlist first...' : 'Select the group you would like to move the items to.')
+                            ->options(fn (Get $get) => Group::where([
                                 'type' => 'live',
                                 'user_id' => auth()->id(),
-                                'playlist_id' => $get('playlist')
+                                'playlist_id' => $get('playlist'),
                             ])->get(['name', 'id'])->pluck('name', 'id'))
                             ->searchable()
-                            ->disabled(fn(Get $get) => $get('playlist') === null),
+                            ->disabled(fn (Get $get) => $get('playlist') === null),
                     ])
                     ->action(function (Collection $records, array $data): void {
                         $filtered = $records->where('playlist_id', $data['playlist']);
@@ -541,31 +501,6 @@ class ChannelResource extends Resource
                     ->modalIcon('heroicon-o-arrows-right-left')
                     ->modalDescription('Move the selected channel(s) to the chosen group.')
                     ->modalSubmitActionLabel('Move now'),
-                BulkAction::make('map')
-                    ->label('Map EPG to selected')
-                    ->schema(EpgMapResource::getForm(showPlaylist: false, showEpg: true))
-                    ->action(function (Collection $records, array $data): void {
-                        app('Illuminate\Contracts\Bus\Dispatcher')
-                            ->dispatch(new MapPlaylistChannelsToEpg(
-                                epg: (int)$data['epg_id'],
-                                channels: $records->pluck('id')->toArray(),
-                                force: $data['override'],
-                                settings: $data['settings'] ?? [],
-                            ));
-                    })->after(function () {
-                        Notification::make()
-                            ->success()
-                            ->title('EPG to Channel mapping')
-                            ->body('Mapping started, you will be notified when the process is complete.')
-                            ->send();
-                    })
-                    ->deselectRecordsAfterCompletion()
-                    ->requiresConfirmation()
-                    ->icon('heroicon-o-link')
-                    ->modalIcon('heroicon-o-link')
-                    ->modalWidth(Width::FourExtraLarge)
-                    ->modalDescription('Map the selected EPG to the selected channel(s).')
-                    ->modalSubmitActionLabel('Map now'),
                 BulkAction::make('preferred_logo')
                     ->label('Update preferred icon')
                     ->schema([
@@ -597,6 +532,59 @@ class ChannelResource extends Resource
                     ->modalIcon('heroicon-o-photo')
                     ->modalDescription('Update the preferred icon for the selected channel(s).')
                     ->modalSubmitActionLabel('Update now'),
+                BulkAction::make('set_logo_override_url')
+                    ->label('Set logo override URL')
+                    ->schema([
+                        TextInput::make('logo')
+                            ->label('Logo override URL')
+                            ->url()
+                            ->nullable()
+                            ->helperText('Leave empty to remove the custom logo and use provider/EPG logo.'),
+                    ])
+                    ->action(function (Collection $records, array $data): void {
+                        Channel::whereIn('id', $records->pluck('id')->toArray())
+                            ->update([
+                                'logo' => empty($data['logo']) ? null : $data['logo'],
+                            ]);
+                    })->after(function () {
+                        Notification::make()
+                            ->success()
+                            ->title('Logo override updated')
+                            ->body('The logo override URL has been updated for the selected channels.')
+                            ->send();
+                    })
+                    ->deselectRecordsAfterCompletion()
+                    ->requiresConfirmation()
+                    ->icon('heroicon-o-link')
+                    ->modalIcon('heroicon-o-link')
+                    ->modalDescription('Apply a single logo override URL to all selected channels. Leave empty to remove overrides.')
+                    ->modalSubmitActionLabel('Apply URL'),
+                BulkAction::make('refresh_logo_cache')
+                    ->label('Refresh logo cache (selected)')
+                    ->action(function (Collection $records): void {
+                        $urls = [];
+
+                        foreach ($records as $record) {
+                            $urls[] = $record->logo;
+                            $urls[] = $record->logo_internal;
+                            $urls[] = $record->epgChannel?->icon_custom;
+                            $urls[] = $record->epgChannel?->icon;
+                        }
+
+                        $cleared = LogoCacheService::clearByUrls($urls);
+
+                        Notification::make()
+                            ->success()
+                            ->title('Selected logo cache refreshed')
+                            ->body("Removed {$cleared} cache file(s) for selected channels.")
+                            ->send();
+                    })
+                    ->deselectRecordsAfterCompletion()
+                    ->requiresConfirmation()
+                    ->icon('heroicon-o-arrow-path')
+                    ->modalIcon('heroicon-o-arrow-path')
+                    ->modalDescription('Clear cached logos for selected channels so they are fetched again on the next request.')
+                    ->modalSubmitActionLabel('Refresh selected cache'),
                 BulkAction::make('failover')
                     ->label('Add as failover')
                     ->schema(function (Collection $records) {
@@ -607,6 +595,7 @@ class ChannelResource extends Resource
                             $playlistName = $record->getEffectivePlaylist()->name ?? 'Unknown';
                             $initialMasterOptions[$record->id] = "{$displayTitle} [{$playlistName}]";
                         }
+
                         return [
                             ToggleButtons::make('master_source')
                                 ->label('Choose master from?')
@@ -626,13 +615,13 @@ class ChannelResource extends Resource
                                 ->helperText('From the selected channels')
                                 ->options($initialMasterOptions)
                                 ->required()
-                                ->hidden(fn(Get $get) => $get('master_source') !== 'selected')
+                                ->hidden(fn (Get $get) => $get('master_source') !== 'selected')
                                 ->searchable(),
                             Select::make('master_channel_id')
                                 ->label('Search for master channel')
                                 ->searchable()
                                 ->required()
-                                ->hidden(fn(Get $get) => $get('master_source') !== 'searched')
+                                ->hidden(fn (Get $get) => $get('master_source') !== 'searched')
                                 ->getSearchResultsUsing(function (string $search) use ($existingFailoverIds) {
                                     $searchLower = strtolower($search);
                                     $channels = auth()->user()->channels()
@@ -670,7 +659,7 @@ class ChannelResource extends Resource
                             ? $data['selected_master_id']
                             : $data['master_channel_id'];
                         $failoverRecords = $records->filter(function ($record) use ($masterRecordId) {
-                            return (int)$record->id !== (int)$masterRecordId;
+                            return (int) $record->id !== (int) $masterRecordId;
                         });
 
                         foreach ($failoverRecords as $record) {
@@ -692,6 +681,96 @@ class ChannelResource extends Resource
                     ->modalIcon('heroicon-o-arrow-path-rounded-square')
                     ->modalDescription('Add the selected channel(s) to the chosen channel as failover sources.')
                     ->modalSubmitActionLabel('Add failovers now'),
+                ...($includeRecount ? [
+                    BulkAction::make('recount')
+                        ->label('Recount Channels')
+                        ->icon('heroicon-o-hashtag')
+                        ->schema([
+                            TextInput::make('start')
+                                ->label('Start Number')
+                                ->numeric()
+                                ->default(1)
+                                ->required(),
+                        ])
+                        ->action(function (Collection $records, array $data): void {
+                            $start = (int) $data['start'];
+                            SortFacade::bulkRecountChannels($records, $start);
+                        })
+                        ->after(function ($livewire) {
+                            Notification::make()
+                                ->success()
+                                ->title('Channels Recounted')
+                                ->body('The selected channels have been recounted.')
+                                ->send();
+                        })
+                        ->requiresConfirmation()
+                        ->modalIcon('heroicon-o-hashtag')
+                        ->modalDescription('Recount the selected channels sequentially? Channel numbers will be assigned based on the current sort order.'),
+                ] : []),
+                BulkAction::make('map')
+                    ->label('Map EPG to selected')
+                    ->schema(EpgMapResource::getForm(showPlaylist: false, showEpg: true))
+                    ->action(function (Collection $records, array $data): void {
+                        app('Illuminate\Contracts\Bus\Dispatcher')
+                            ->dispatch(new MapPlaylistChannelsToEpg(
+                                epg: (int) $data['epg_id'],
+                                channels: $records->pluck('id')->toArray(),
+                                force: $data['override'],
+                                settings: $data['settings'] ?? [],
+                            ));
+                    })->after(function () {
+                        Notification::make()
+                            ->success()
+                            ->title('EPG to Channel mapping')
+                            ->body('Mapping started, you will be notified when the process is complete.')
+                            ->send();
+                    })
+                    ->deselectRecordsAfterCompletion()
+                    ->requiresConfirmation()
+                    ->icon('heroicon-o-link')
+                    ->modalIcon('heroicon-o-link')
+                    ->modalWidth(Width::FourExtraLarge)
+                    ->modalDescription('Map the selected EPG to the selected channel(s).')
+                    ->modalSubmitActionLabel('Map now'),
+                BulkAction::make('unmap')
+                    ->label('Undo EPG Map')
+                    ->action(function (Collection $records): void {
+                        // Clear the EPG mapping
+                        Channel::whereIn('id', $records->pluck('id'))
+                            ->update(['epg_channel_id' => null]);
+
+                        // Invalidate cached EPG XML for all playlists containing these channels
+                        // (regular, custom, and merged) so Xtream API clients receive updated
+                        // XMLTV data immediately instead of waiting for the cache TTL to expire
+                        $records->loadMissing(['playlist.mergedPlaylists', 'customPlaylists']);
+
+                        $affectedPlaylists = collect();
+                        foreach ($records as $channel) {
+                            if ($channel->playlist) {
+                                $affectedPlaylists->push($channel->playlist);
+                                foreach ($channel->playlist->mergedPlaylists as $merged) {
+                                    $affectedPlaylists->push($merged);
+                                }
+                            }
+                            foreach ($channel->customPlaylists as $custom) {
+                                $affectedPlaylists->push($custom);
+                            }
+                        }
+                        $affectedPlaylists->unique(fn ($p) => $p->getTable().'-'.$p->id)
+                            ->each(fn ($p) => EpgCacheService::clearPlaylistEpgCacheFile($p));
+                    })->after(function () {
+                        Notification::make()
+                            ->success()
+                            ->title('EPG Channel mapping removed')
+                            ->body('Channel mapping removed for the selected channels.')
+                            ->send();
+                    })
+                    ->requiresConfirmation()
+                    ->icon('heroicon-o-arrow-uturn-left')
+                    ->color('warning')
+                    ->modalIcon('heroicon-o-arrow-uturn-left')
+                    ->modalDescription('Clear EPG mappings for the selected channels.')
+                    ->modalSubmitActionLabel('Reset now'),
                 BulkAction::make('find-replace')
                     ->label('Find & Replace')
                     ->schema([
@@ -710,20 +789,20 @@ class ChannelResource extends Resource
                             ->required()
                             ->columnSpan(1),
                         TextInput::make('find_replace')
-                            ->label(fn(Get $get) =>  !$get('use_regex') ? 'String to replace' : 'Pattern to replace')
+                            ->label(fn (Get $get) => ! $get('use_regex') ? 'String to replace' : 'Pattern to replace')
                             ->required()
                             ->placeholder(
-                                fn(Get $get) => $get('use_regex')
+                                fn (Get $get) => $get('use_regex')
                                     ? '^(US- |UK- |CA- )'
                                     : 'US -'
                             )->helperText(
-                                fn(Get $get) => !$get('use_regex')
+                                fn (Get $get) => ! $get('use_regex')
                                     ? 'This is the string you want to find and replace.'
                                     : 'This is the regex pattern you want to find. Make sure to use valid regex syntax.'
                             ),
                         TextInput::make('replace_with')
                             ->label('Replace with (optional)')
-                            ->placeholder('Leave empty to remove')
+                            ->placeholder('Leave empty to remove'),
 
                     ])
                     ->action(function (Collection $records, array $data): void {
@@ -784,6 +863,88 @@ class ChannelResource extends Resource
                     ->modalIcon('heroicon-o-arrow-uturn-left')
                     ->modalDescription('Reset Find & Replace results back to playlist defaults for the selected channels. This will remove any custom values set in the selected column.')
                     ->modalSubmitActionLabel('Reset now'),
+                BulkAction::make('enable-epg-mapping')
+                    ->label('Enable EPG mapping')
+                    ->action(function (Collection $records, array $data): void {
+                        $records->each(fn ($channel) => $channel->update([
+                            'epg_map_enabled' => true,
+                        ]));
+                    })->after(function () {
+                        Notification::make()
+                            ->success()
+                            ->title('EPG map re-enabled for selected channels')
+                            ->body('The EPG map has been re-enabled for the selected channels.')
+                            ->send();
+                    })
+                    ->hidden(fn () => ! $addToCustom)
+                    ->deselectRecordsAfterCompletion()
+                    ->requiresConfirmation()
+                    ->icon('heroicon-o-calendar')
+                    ->modalIcon('heroicon-o-calendar')
+                    ->modalDescription('Allow mapping EPG to selected channels when running EPG mapping jobs.')
+                    ->modalSubmitActionLabel('Enable now'),
+                BulkAction::make('disable-epg-mapping')
+                    ->label('Disable EPG mapping')
+                    ->color('warning')
+                    ->action(function (Collection $records, array $data): void {
+                        $records->each(fn ($channel) => $channel->update([
+                            'epg_map_enabled' => false,
+                        ]));
+                    })->after(function () {
+                        Notification::make()
+                            ->success()
+                            ->title('EPG map disabled for selected channels')
+                            ->body('The EPG map has been disabled for the selected channels.')
+                            ->send();
+                    })
+                    ->hidden(fn () => ! $addToCustom)
+                    ->deselectRecordsAfterCompletion()
+                    ->requiresConfirmation()
+                    ->icon('heroicon-o-calendar')
+                    ->modalIcon('heroicon-o-calendar')
+                    ->modalDescription('Don\'t map EPG to selected channels when running EPG mapping jobs.')
+                    ->modalSubmitActionLabel('Disable now'),
+                BulkAction::make('enable-merge')
+                    ->label('Enable Merge')
+                    ->action(function (Collection $records, array $data): void {
+                        $records->each(fn ($channel) => $channel->update([
+                            'can_merge' => true,
+                        ]));
+                    })->after(function () {
+                        Notification::make()
+                            ->success()
+                            ->title('Merge re-enabled for selected channels')
+                            ->body('The merge has been re-enabled for the selected channels. They can now be merged during "Merge Same ID" jobs.')
+                            ->send();
+                    })
+                    ->hidden(fn () => ! $addToCustom)
+                    ->deselectRecordsAfterCompletion()
+                    ->requiresConfirmation()
+                    ->icon('heroicon-o-arrows-pointing-in')
+                    ->modalIcon('heroicon-o-arrows-pointing-in')
+                    ->modalDescription('Allow merging for selected channels when running "Merge Same ID" jobs.')
+                    ->modalSubmitActionLabel('Enable now'),
+                BulkAction::make('disable-merge')
+                    ->label('Disable Merge')
+                    ->color('warning')
+                    ->action(function (Collection $records, array $data): void {
+                        $records->each(fn ($channel) => $channel->update([
+                            'can_merge' => false,
+                        ]));
+                    })->after(function () {
+                        Notification::make()
+                            ->success()
+                            ->title('Merge disabled for selected channels')
+                            ->body('The merge has been disabled for the selected channels. They will not be merged during "Merge Same ID" jobs.')
+                            ->send();
+                    })
+                    ->hidden(fn () => ! $addToCustom)
+                    ->deselectRecordsAfterCompletion()
+                    ->requiresConfirmation()
+                    ->icon('heroicon-o-arrows-pointing-in')
+                    ->modalIcon('heroicon-o-arrows-pointing-in')
+                    ->modalDescription('Don\'t allow merging for selected channels when running "Merge Same ID" jobs.')
+                    ->modalSubmitActionLabel('Disable now'),
                 BulkAction::make('enable')
                     ->label('Enable selected')
                     ->action(function (Collection $records): void {
@@ -823,7 +984,7 @@ class ChannelResource extends Resource
                     ->icon('heroicon-o-x-circle')
                     ->modalIcon('heroicon-o-x-circle')
                     ->modalDescription('Disable the selected channel(s) now?')
-                    ->modalSubmitActionLabel('Yes, disable now')
+                    ->modalSubmitActionLabel('Yes, disable now'),
             ]),
         ];
     }
@@ -831,7 +992,7 @@ class ChannelResource extends Resource
     public static function getRelations(): array
     {
         return [
-            // 
+            //
         ];
     }
 
@@ -839,8 +1000,8 @@ class ChannelResource extends Resource
     {
         return [
             'index' => ListChannels::route('/'),
-            //'create' => Pages\CreateChannel::route('/create'),
-            //'view' => Pages\ViewChannel::route('/{record}'),
+            // 'create' => Pages\CreateChannel::route('/create'),
+            // 'view' => Pages\ViewChannel::route('/{record}'),
             // 'edit' => Pages\EditChannel::route('/{record}/edit'),
         ];
     }
@@ -881,8 +1042,14 @@ class ChannelResource extends Resource
         return [
             // Customizable channel fields
             Toggle::make('enabled')
+                ->columnSpanFull()
+                ->default(true),
+            Toggle::make('can_merge')
                 ->default(true)
-                ->columnSpan('full'),
+                ->helperText('Allow this channel to be merged during "Merge Same ID" jobs.'),
+            Toggle::make('epg_map_enabled')
+                ->default(true)
+                ->helperText('Allow mapping EPG to this channel when running EPG mapping jobs.'),
             Fieldset::make('Playlist Type (choose one)')
                 ->schema([
                     Toggle::make('is_custom')
@@ -891,7 +1058,7 @@ class ChannelResource extends Resource
                         ->columnSpan('full'),
                     Select::make('playlist_id')
                         ->label('Playlist')
-                        ->options(fn() => Playlist::where(['user_id' => auth()->id()])->get(['name', 'id'])->pluck('name', 'id'))
+                        ->options(fn () => Playlist::where(['user_id' => auth()->id()])->get(['name', 'id'])->pluck('name', 'id'))
                         ->searchable()
                         ->live()
                         ->afterStateUpdated(function (Set $set, $state) {
@@ -909,7 +1076,7 @@ class ChannelResource extends Resource
                         ->rules(['exists:playlists,id']),
                     Select::make('custom_playlist_id')
                         ->label('Custom Playlist')
-                        ->options(fn() => CustomPlaylist::where(['user_id' => auth()->id()])->get(['name', 'id'])->pluck('name', 'id'))
+                        ->options(fn () => CustomPlaylist::where(['user_id' => auth()->id()])->get(['name', 'id'])->pluck('name', 'id'))
                         ->searchable()
                         ->disabled($customPlaylist !== null)
                         ->default($customPlaylist ? $customPlaylist->id : null)
@@ -926,7 +1093,7 @@ class ChannelResource extends Resource
                             'required_without' => 'Custom Playlist is required if not using a standard playlist.',
                         ])
                         ->dehydrated(true)
-                        ->rules(['exists:custom_playlists,id'])
+                        ->rules(['exists:custom_playlists,id']),
                 ])->hidden($edit),
             Fieldset::make('General Settings')
                 ->schema([
@@ -938,24 +1105,24 @@ class ChannelResource extends Resource
                         ->rules(['min:1', 'max:255']),
                     TextInput::make('title_custom')
                         ->label('Title')
-                        ->placeholder(fn(Get $get) => $get('title'))
-                        ->helperText("Leave empty to use default value.")
+                        ->placeholder(fn (Get $get) => $get('title'))
+                        ->helperText('Leave empty to use default value.')
                         ->columnSpan(1)
                         ->rules(['min:1', 'max:255'])
-                        ->hidden(!$edit),
+                        ->hidden(! $edit),
                     TextInput::make('name_custom')
                         ->label('Name')
                         ->hint('tvg-name')
-                        ->placeholder(fn(Get $get) => $get('name'))
-                        ->helperText(fn(Get $get) => $get('is_custom') ? "" : "Leave empty to use default value.")
+                        ->placeholder(fn (Get $get) => $get('name'))
+                        ->helperText(fn (Get $get) => $get('is_custom') ? '' : 'Leave empty to use default value.')
                         ->columnSpan(1)
                         ->rules(['min:1', 'max:255']),
                     TextInput::make('stream_id_custom')
                         ->label('ID')
                         ->hint('tvg-id')
                         ->columnSpan(1)
-                        ->placeholder(fn(Get $get) => $get('stream_id'))
-                        ->helperText(fn(Get $get) => $get('is_custom') ? "" : "Leave empty to use default value.")
+                        ->placeholder(fn (Get $get) => $get('stream_id'))
+                        ->helperText(fn (Get $get) => $get('is_custom') ? '' : 'Leave empty to use default value.')
                         ->rules(['min:1', 'max:255']),
                     TextInput::make('station_id')
                         ->label('Station ID')
@@ -965,7 +1132,7 @@ class ChannelResource extends Resource
                             tooltip: 'Gracenote station ID is a unique identifier for a TV channel in the Gracenote database. It is used to associate the channel with its metadata, such as program listings and other information.'
                         )
                         ->columnSpan(1)
-                        ->helperText("Gracenote station ID")
+                        ->helperText('Gracenote station ID')
                         ->type('number')
                         ->rules(['numeric', 'min:0']),
                     TextInput::make('channel')
@@ -974,7 +1141,7 @@ class ChannelResource extends Resource
                         ->columnSpan(1)
                         ->rules(['numeric', 'min:0']),
                     TextInput::make('shift')
-                        ->label("Time Shift")
+                        ->label('Time Shift')
                         ->hint('timeshift')
                         ->hintIcon(
                             'heroicon-m-question-mark-circle',
@@ -991,7 +1158,7 @@ class ChannelResource extends Resource
                             Select::make('group_id')
                                 ->label('Group')
                                 ->hint('group-title')
-                                ->options(fn(Get $get) => Group::where('playlist_id', $get('playlist_id'))->get(['name', 'id'])->pluck('name', 'id'))
+                                ->options(fn (Get $get) => Group::where('playlist_id', $get('playlist_id'))->get(['name', 'id'])->pluck('name', 'id'))
                                 ->columnSpanFull()
                                 ->placeholder('Select a group')
                                 ->searchable()
@@ -1001,28 +1168,28 @@ class ChannelResource extends Resource
                                     $set('group', $group->name ?? null);
                                 })
                                 ->rules(['numeric', 'min:0']),
-                        ])->hidden(fn(Get $get) => !$get('playlist_id')),
+                        ])->hidden(fn (Get $get) => ! $get('playlist_id')),
                     TextInput::make('group')
                         ->columnSpanFull()
                         ->placeholder('Enter a group title')
                         ->hint('group-title')
-                        ->hidden(!$edit)
+                        ->hidden(! $edit)
                         ->rules(['min:1', 'max:255'])
-                        ->hidden(fn(Get $get) => !$get('custom_playlist_id')),
+                        ->hidden(fn (Get $get) => ! $get('custom_playlist_id')),
                 ]),
             Fieldset::make('URL Settings')
                 ->schema([
                     TextInput::make('url')
-                        ->label(fn(Get $get) => $get('is_custom') ? 'URL' : 'Provider URL')
+                        ->label(fn (Get $get) => $get('is_custom') ? 'URL' : 'Provider URL')
                         ->columnSpan(1)
                         ->prefixIcon('heroicon-m-globe-alt')
                         ->hintIcon(
-                            icon: fn(Get $get) => $get('is_custom') ? null : 'heroicon-m-question-mark-circle',
-                            tooltip: fn(Get $get) => $get('is_custom') ? null : 'The original URL from the playlist provider. This is read-only and cannot be modified. This URL is automatically updated on Playlist sync.'
+                            icon: fn (Get $get) => $get('is_custom') ? null : 'heroicon-m-question-mark-circle',
+                            tooltip: fn (Get $get) => $get('is_custom') ? null : 'The original URL from the playlist provider. This is read-only and cannot be modified. This URL is automatically updated on Playlist sync.'
                         )
-                        ->formatStateUsing(fn($record) => $record?->url)
-                        ->disabled(fn(Get $get) => !$get('is_custom')) // make it read-only but copyable for non-custom channels
-                        ->dehydrated(fn(Get $get) => $get('is_custom')) // don't save the value in the database for custom channels
+                        ->formatStateUsing(fn ($record) => $record?->url)
+                        ->disabled(fn (Get $get) => ! $get('is_custom')) // make it read-only but copyable for non-custom channels
+                        ->dehydrated(fn (Get $get) => $get('is_custom')) // don't save the value in the database for custom channels
                         ->type('url'),
                     TextInput::make('url_custom')
                         ->label('URL Override')
@@ -1032,22 +1199,22 @@ class ChannelResource extends Resource
                             'heroicon-m-question-mark-circle',
                             tooltip: 'Override the provider URL with your own custom URL. This URL will be used instead of the provider URL.'
                         )
-                        ->helperText("Leave empty to use provider URL.")
+                        ->helperText('Leave empty to use provider URL.')
                         ->rules(['min:1'])
                         ->type('url')
-                        ->hidden(fn(Get $get) => $get('is_custom')),
+                        ->hidden(fn (Get $get) => $get('is_custom')),
                     TextInput::make('logo_internal')
-                        ->label(fn(Get $get) => $get('is_custom') ? 'Logo' : 'Provider Logo')
+                        ->label(fn (Get $get) => $get('is_custom') ? 'Logo' : 'Provider Logo')
                         ->columnSpan(1)
                         ->prefixIcon('heroicon-m-globe-alt')
                         ->hint('tvg-logo')
                         ->hintIcon(
-                            icon: fn(Get $get) => $get('is_custom') ? null : 'heroicon-m-question-mark-circle',
-                            tooltip: fn(Get $get) => $get('is_custom') ? null : 'The original logo from the playlist provider. This is read-only and cannot be modified. This URL is automatically updated on Playlist sync.'
+                            icon: fn (Get $get) => $get('is_custom') ? null : 'heroicon-m-question-mark-circle',
+                            tooltip: fn (Get $get) => $get('is_custom') ? null : 'The original logo from the playlist provider. This is read-only and cannot be modified. This URL is automatically updated on Playlist sync.'
                         )
-                        ->formatStateUsing(fn($record) => $record?->logo_internal)
-                        ->disabled(fn(Get $get) => !$get('is_custom')) // make it read-only but copyable for non-custom channels
-                        ->dehydrated(fn(Get $get) => $get('is_custom')) // don't save the value in the database for custom channels
+                        ->formatStateUsing(fn ($record) => $record?->logo_internal)
+                        ->disabled(fn (Get $get) => ! $get('is_custom')) // make it read-only but copyable for non-custom channels
+                        ->dehydrated(fn (Get $get) => $get('is_custom')) // don't save the value in the database for custom channels
                         ->type('url'),
                     TextInput::make('logo')
                         ->label('Logo Override')
@@ -1058,10 +1225,10 @@ class ChannelResource extends Resource
                             'heroicon-m-question-mark-circle',
                             tooltip: 'Override the provider logo with your own custom logo. This logo will be used instead of the provider logo.'
                         )
-                        ->helperText("Leave empty to use provider logo.")
+                        ->helperText('Leave empty to use provider logo.')
                         ->rules(['min:1'])
                         ->type('url')
-                        ->hidden(fn(Get $get) => $get('is_custom')),
+                        ->hidden(fn (Get $get) => $get('is_custom')),
                     TextInput::make('url_proxy')
                         ->label('Proxy URL')
                         ->columnSpan(2)
@@ -1071,7 +1238,7 @@ class ChannelResource extends Resource
                             tooltip: 'Use m3u editor proxy to access this channel.'
                         )
                         ->formatStateUsing(function ($record) {
-                            if (!$record || !$record->id) {
+                            if (! $record || ! $record->id) {
                                 return null;
                             }
                             try {
@@ -1082,7 +1249,7 @@ class ChannelResource extends Resource
                                 return null;
                             }
                         })
-                        ->helperText("m3u editor proxy url.")
+                        ->helperText('m3u editor proxy url.')
                         ->disabled() // make it read-only but copyable
                         ->dehydrated(false) // don't save the value in the database
                         ->type('url')
@@ -1095,7 +1262,7 @@ class ChannelResource extends Resource
                         ->label('EPG Channel')
                         ->helperText('Select an associated EPG channel for this channel.')
                         ->relationship('epgChannel', 'name')
-                        ->getOptionLabelFromRecordUsing(fn($record) => "$record->name [{$record->epg->name}]")
+                        ->getOptionLabelFromRecordUsing(fn ($record) => "$record->name [{$record->epg->name}]")
                         ->getSearchResultsUsing(function (string $search) {
                             $searchLower = strtolower($search);
                             $channels = auth()->user()->epgChannels()
@@ -1116,6 +1283,7 @@ class ChannelResource extends Resource
                                 $epgName = $channel->epg->name ?? 'Unknown';
                                 $options[$channel->id] = "{$displayTitle} [{$epgName}]";
                             }
+
                             return $options;
                         })
                         ->searchable()
@@ -1154,23 +1322,24 @@ class ChannelResource extends Resource
                                 ->label('Failover Channel')
                                 ->options(function ($state, $record) {
                                     // Get the current channel ID to exclude it from options
-                                    if (!$state) {
+                                    if (! $state) {
                                         return [];
                                     }
                                     $channel = Channel::find($state);
-                                    if (!$channel) {
+                                    if (! $channel) {
                                         return [];
                                     }
 
                                     // Return the single channel as the only results if not searching
                                     $displayTitle = $channel->title_custom ?: $channel->title;
                                     $playlistName = $channel->getEffectivePlaylist()->name ?? 'Unknown';
+
                                     return [$channel->id => "{$displayTitle} [{$playlistName}]"];
                                 })
                                 ->searchable()
                                 ->getSearchResultsUsing(function (string $search, $get, $livewire) {
                                     $existingFailoverIds = collect($get('../../failovers') ?? [])
-                                        ->filter(fn($failover) => $failover['channel_failover_id'] ?? null)
+                                        ->filter(fn ($failover) => $failover['channel_failover_id'] ?? null)
                                         ->pluck('channel_failover_id')
                                         ->toArray();
 
@@ -1212,8 +1381,8 @@ class ChannelResource extends Resource
                         ->columns(1)
                         ->addActionLabel('Add failover channel')
                         ->columnSpanFull()
-                        ->defaultItems(0)
-                ])
+                        ->defaultItems(0),
+                ]),
         ];
     }
 
@@ -1222,9 +1391,10 @@ class ChannelResource extends Resource
      *
      * This method is used to create a channel with custom data, typically for a Custom Playlist.
      *
-     * @param array $data The data for the channel.
-     * @param string $model The model class to use for creating the channel.
+     * @param  array  $data  The data for the channel.
+     * @param  string  $model  The model class to use for creating the channel.
      * @return Model The created channel model.
+     *
      * @throws ValidationException
      * @throws ModelNotFoundException
      * @throws QueryException
@@ -1234,10 +1404,10 @@ class ChannelResource extends Resource
     {
         $data['user_id'] = auth()->id();
         $data['is_custom'] = true;
-        if (!$data['shift']) {
+        if (! $data['shift']) {
             $data['shift'] = 0; // Default shift to 0 if not provided
         }
-        if (!$data['logo_type']) {
+        if (! $data['logo_type']) {
             $data['logo_type'] = 'channel'; // Default to channel if not provided
         }
         $channel = $model::create($data);
@@ -1249,6 +1419,7 @@ class ChannelResource extends Resource
 
             $channel->save();
         }
+
         return $channel;
     }
 }

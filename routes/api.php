@@ -21,7 +21,12 @@ Route::middleware(['proxy.throttle'])->prefix('m3u-proxy')->group(function () {
     Route::post('failover-resolver', [\App\Http\Controllers\Api\M3uProxyApiController::class, 'resolveFailoverUrl'])
         ->name('m3u-proxy.failover-resolver')
         ->withoutMiddleware('proxy.throttle');
-    
+
+    // Player stream stop - called via sendBeacon when in-app player is closed
+    Route::post('player-stream/stop', [\App\Http\Controllers\Api\M3uProxyApiController::class, 'stopPlayerStream'])
+        ->name('m3u-proxy.player-stream.stop')
+        ->withoutMiddleware('proxy.throttle');
+
     // Player preview routes
     Route::get('channel/{id}/player/{uuid?}', [\App\Http\Controllers\Api\M3uProxyApiController::class, 'channelPlayer'])
         ->name('m3u-proxy.channel.player');
@@ -31,6 +36,13 @@ Route::middleware(['proxy.throttle'])->prefix('m3u-proxy')->group(function () {
     // Main proxy routes
     Route::post('webhooks', [\App\Http\Controllers\Api\M3uProxyApiController::class, 'handleWebhook'])
         ->name('m3u-proxy.webhook');
+
+    // Network broadcast callback - called by proxy when broadcast FFmpeg process exits
+    Route::post('broadcast/callback', [\App\Http\Controllers\Api\M3uProxyApiController::class, 'handleBroadcastCallback'])
+        ->name('m3u-proxy.broadcast.callback')
+        ->withoutMiddleware('proxy.throttle');
+
+    // Content access routes
     Route::get('channel/{id}/{uuid?}', [\App\Http\Controllers\Api\M3uProxyApiController::class, 'channel'])
         ->name('m3u-proxy.channel');
     Route::get('episode/{id}/{uuid?}', [\App\Http\Controllers\Api\M3uProxyApiController::class, 'episode'])

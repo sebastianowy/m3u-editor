@@ -12,7 +12,7 @@ class PruneOldNotifications extends Command
      *
      * @var string
      */
-    protected $signature = 'app:prune-old-notifications {--days=30 : The number of days to keep notifications}';
+    protected $signature = 'app:prune-old-notifications {--days=7 : The number of days to keep notifications}';
 
     /**
      * The console command description.
@@ -26,8 +26,8 @@ class PruneOldNotifications extends Command
      */
     public function handle()
     {
-        $days = $this->option('days') ?? 30;
-        $this->info('Cleaning notifications older than ' . $days . ' days...');
+        $days = $this->option('days') ?? 7;
+        $this->info('Cleaning notifications older than '.$days.' days...');
         DB::table('notifications')
             ->where('created_at', '<', now()->subDays($days))
             ->delete();

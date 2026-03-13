@@ -5,7 +5,7 @@ namespace App\Models;
 use App\Enums\ChannelLogoType;
 use App\Enums\PlaylistSourceType;
 use App\Facades\ProxyFacade;
-use App\Http\Controllers\LogoProxyController;
+use App\Jobs\FetchTmdbIds;
 use App\Services\XtreamService;
 use App\Settings\GeneralSettings;
 use Exception;
@@ -20,7 +20,6 @@ use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Log;
 use Spatie\Tags\HasTags;
 use Symfony\Component\Process\Process as SymfonyProcess;
-use Illuminate\Support\Str;
 
 class Channel extends Model
 {
@@ -39,16 +38,21 @@ class Channel extends Model
         'shift' => 'integer',
         'user_id' => 'integer',
         'playlist_id' => 'integer',
+        'network_id' => 'integer',
         'group_id' => 'integer',
         'extvlcopt' => 'array',
         'kodidrop' => 'array',
         'is_custom' => 'boolean',
         'is_vod' => 'boolean',
+        'tmdb_id' => 'integer',
+        'tvdb_id' => 'integer',
         'info' => 'array',
         'movie_data' => 'array',
         'sync_settings' => 'array',
         'last_metadata_fetch' => 'datetime',
+        'epg_map_enabled' => 'boolean',
         'logo_type' => ChannelLogoType::class,
+        'sort' => 'decimal:4',
     ];
 
     public function user(): BelongsTo
@@ -59,6 +63,22 @@ class Channel extends Model
     public function playlist(): BelongsTo
     {
         return $this->belongsTo(Playlist::class);
+    }
+
+    /**
+     * Get the network this channel represents (if any).
+     */
+    public function network(): BelongsTo
+    {
+        return $this->belongsTo(Network::class);
+    }
+
+    /**
+     * Check if this channel is a network channel.
+     */
+    public function isNetworkChannel(): bool
+    {
+        return $this->network_id !== null;
     }
 
     /**
@@ -73,6 +93,11 @@ class Channel extends Model
     public function group(): BelongsTo
     {
         return $this->belongsTo(Group::class);
+    }
+
+    public function streamFileSetting(): BelongsTo
+    {
+        return $this->belongsTo(StreamFileSetting::class);
     }
 
     public function epgChannel(): BelongsTo
@@ -181,9 +206,7 @@ class Channel extends Model
         }
         try {
             $url = $this->url_custom ?? $this->url;
-            $process = SymfonyProcess::fromShellCommandline(
-                "ffprobe -v quiet -print_format json -show_streams {$url}"
-            );
+            $process = new SymfonyProcess(['ffprobe', '-v', 'quiet', '-print_format', 'json', '-show_streams', $url]);
             $process->setTimeout(10);
             $output = '';
             $errors = '';
@@ -238,14 +261,17 @@ class Channel extends Model
         return [];
     }
 
-    public function fetchMetadata($xtream = null, $refresh = false)
+    public function fetchMetadata($xtream = null, $refresh = false, bool $skipTmdb = false)
     {
         try {
             $playlist = $this->playlist;
 
+            // Get settings instance
+            $settings = app(GeneralSettings::class);
+
             // For Xtream playlists, use XtreamService
-            if (!$xtream) {
-                if (!$playlist->xtream && $playlist->source_type !== PlaylistSourceType::Xtream) {
+            if (! $xtream) {
+                if (! $playlist->xtream && $playlist->source_type !== PlaylistSourceType::Xtream) {
                     // Not an Xtream playlist and not Emby, no metadata source available
                     return false;
                 }
@@ -269,7 +295,7 @@ class Channel extends Model
             $releaseDate = $movieData['info']['release_date'] ?? null;
             $releaseDateAlt = $movieData['info']['releasedate'] ?? null;
             $year = $this->year;
-            if (!$releaseDate && $releaseDateAlt) {
+            if (! $releaseDate && $releaseDateAlt) {
                 // Make sure base release_date is always set
                 $movieData['info']['release_date'] = $releaseDateAlt;
             }
@@ -293,9 +319,17 @@ class Channel extends Model
 
             $this->update($update);
 
+            if (! $skipTmdb && $settings->tmdb_auto_lookup_on_import && $this->enabled) {
+                dispatch(new FetchTmdbIds(
+                    vodChannelIds: [$this->id],
+                    overwriteExisting: $refresh ?? false,
+                    sendCompletionNotification: false,
+                ))->afterCommit();
+            }
+
             return true;
         } catch (\Exception $e) {
-            Log::error('Failed to fetch metadata for VOD ' . $this->id, ['exception' => $e]);
+            Log::error('Failed to fetch metadata for VOD '.$this->id, ['exception' => $e]);
         }
 
         return false;

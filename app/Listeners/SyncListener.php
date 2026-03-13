@@ -2,20 +2,14 @@
 
 namespace App\Listeners;
 
-use Throwable;
-use App\Enums\PlaylistSourceType;
 use App\Enums\Status;
 use App\Events\SyncCompleted;
 use App\Jobs\GenerateEpgCache;
-use App\Jobs\MapPlaylistChannelsToEpg;
 use App\Jobs\MergeChannels;
 use App\Jobs\RunPostProcess;
 use App\Models\Epg;
-use App\Models\EpgMap;
 use Filament\Notifications\Notification;
-use Illuminate\Support\Facades\Bus;
-use Illuminate\Contracts\Queue\ShouldQueue;
-use Illuminate\Queue\InteractsWithQueue;
+use Throwable;
 
 class SyncListener
 {
@@ -73,26 +67,50 @@ class SyncListener
             $config = $playlist->auto_merge_config ?? [];
             $useResolution = $config['check_resolution'] ?? false;
             $forceCompleteRemerge = $config['force_complete_remerge'] ?? false;
+            $preferCatchupAsPrimary = $config['prefer_catchup_as_primary'] ?? false;
+            $newChannelsOnly = $config['new_channels_only'] ?? true; // Default to true for new channels only
+            $preferredPlaylistId = $config['preferred_playlist_id'] ?? null;
+            $failoverPlaylists = $config['failover_playlists'] ?? [];
             $deactivateFailover = $playlist->auto_merge_deactivate_failover;
 
-            // Create a collection containing only the current playlist for merging within itself
+            // Build the playlists collection for merging
+            // Start with the current playlist
             $playlists = collect([['playlist_failover_id' => $playlist->id]]);
+
+            // Add any additional failover playlists from config
+            if (! empty($failoverPlaylists)) {
+                foreach ($failoverPlaylists as $failover) {
+                    $failoverId = is_array($failover) ? ($failover['playlist_failover_id'] ?? null) : $failover;
+                    if ($failoverId && $failoverId != $playlist->id) {
+                        $playlists->push(['playlist_failover_id' => $failoverId]);
+                    }
+                }
+            }
+
+            // Determine the preferred playlist ID (use configured one or fallback to current playlist)
+            $effectivePlaylistId = $preferredPlaylistId ? (int) $preferredPlaylistId : $playlist->id;
+
+            // Build weighted config if any weighted priority options are set
+            $weightedConfig = $this->buildWeightedConfig($config);
 
             // Dispatch the merge job
             dispatch(new MergeChannels(
                 user: $playlist->user,
                 playlists: $playlists,
-                playlistId: $playlist->id,
+                playlistId: $effectivePlaylistId,
                 checkResolution: $useResolution,
                 deactivateFailoverChannels: $deactivateFailover,
-                forceCompleteRemerge: $forceCompleteRemerge
+                forceCompleteRemerge: $forceCompleteRemerge,
+                preferCatchupAsPrimary: $preferCatchupAsPrimary,
+                weightedConfig: $weightedConfig,
+                newChannelsOnly: $newChannelsOnly,
             ));
         } catch (Throwable $e) {
             // Log error and send notification
-            logger()->error('Auto-merge failed for playlist: ' . $playlist->name, [
+            logger()->error('Auto-merge failed for playlist: '.$playlist->name, [
                 'playlist_id' => $playlist->id,
                 'error' => $e->getMessage(),
-                'trace' => $e->getTraceAsString()
+                'trace' => $e->getTraceAsString(),
             ]);
 
             Notification::make()
@@ -105,14 +123,45 @@ class SyncListener
     }
 
     /**
+     * Build weighted config array from playlist config if any weighted options are set
+     */
+    private function buildWeightedConfig(array $config): ?array
+    {
+        // Check if any weighted priority options are configured
+        $hasWeightedOptions = ! empty($config['priority_attributes'])
+            || ! empty($config['group_priorities'])
+            || ! empty($config['priority_keywords'])
+            || isset($config['prefer_codec'])
+            || ($config['exclude_disabled_groups'] ?? false);
+
+        if (! $hasWeightedOptions) {
+            return null; // Use legacy behavior
+        }
+
+        return [
+            'priority_attributes' => $config['priority_attributes'] ?? null,
+            'group_priorities' => $config['group_priorities'] ?? [],
+            'priority_keywords' => $config['priority_keywords'] ?? [],
+            'prefer_codec' => $config['prefer_codec'] ?? null,
+            'exclude_disabled_groups' => $config['exclude_disabled_groups'] ?? false,
+        ];
+    }
+
+    /**
      * Post-process an EPG after a successful sync.
      */
     private function postProcessEpg(Epg $epg)
     {
         // Update status to Processing (so UI components will continue to refresh) and dispatch cache job
+        // IMPORTANT: Set is_cached to false to prevent race condition where users
+        // try to read the EPG cache (JSON files) while it's being regenerated
+        // Note: Playlist EPG cache files (XML) are NOT cleared here - they remain available
+        // for users until the new cache is generated, preventing fallback to slow XML reader
         // Note: processing_started_at and processing_phase will be set by GenerateEpgCache job
         $epg->update([
             'status' => Status::Processing,
+            'is_cached' => false,
+            'cache_meta' => null,
             'processing_started_at' => null,
             'processing_phase' => null,
         ]);

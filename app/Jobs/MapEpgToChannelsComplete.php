@@ -6,7 +6,7 @@ use App\Enums\Status;
 use App\Models\Epg;
 use App\Models\EpgMap;
 use App\Models\Job;
-use App\Models\Playlist;
+use App\Services\EpgCacheService;
 use Carbon\Carbon;
 use Filament\Notifications\Notification;
 use Illuminate\Contracts\Queue\ShouldQueue;
@@ -74,9 +74,14 @@ class MapEpgToChannelsComplete implements ShouldQueue
             ]);
         }
 
-        // Notify the user
+        // Invalidate cached EPG XML files for all playlists affected by this EPG source.
         $epg = $this->epg;
-        $title = "Completed processing EPG channel mapping";
+        foreach ($epg->getAllPlaylists() as $playlist) {
+            EpgCacheService::clearPlaylistEpgCacheFile($playlist);
+        }
+
+        // Notify the user
+        $title = 'Completed processing EPG channel mapping';
         $body = "EPG \"{$epg->name}\" channel mapping completed. Mapped {$actualMappedCount} of {$this->channelCount} channels. Mapping took {$completedInRounded} seconds.";
         Notification::make()
             ->success()

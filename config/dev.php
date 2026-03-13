@@ -2,18 +2,18 @@
 
 return [
     'author' => 'Shaun Parkison',
-    'version' => '0.8.19',
-    'dev_version' => '0.8.24-dev',
-    'experimental_version' => '0.8.25-exp',
-    'repo' => 'sparkison/m3u-editor',
-    'docs_url' => 'https://sparkison.github.io/m3u-editor-docs',
+    'version' => '0.9.17',
+    'dev_version' => '0.9.21-dev',
+    'experimental_version' => '0.10.4-exp',
+    'repo' => 'm3ue/m3u-editor',
+    'docs_url' => 'https://m3ue.sparkison.dev',
     'donate' => 'https://buymeacoffee.com/shparkison',
     'discord_url' => 'https://discord.gg/rS3abJ5dz7',
     'paypal' => 'https://www.paypal.com/donate/?hosted_button_id=ULJRPVWJNBSSG',
     'kofi' => 'https://ko-fi.com/sparkison',
     'admin_emails' => [
         // Default admin email
-        'admin@test.com'
+        'admin@test.com',
     ],
     'tvgid' => [
         'regex' => env('TVGID_REGEX', '/[^a-zA-Z0-9_\-\.]/'),
@@ -25,42 +25,13 @@ return [
     'invalidate_import_threshold' => env('INVALIDATE_IMPORT_THRESHOLD', null), // Threshold for invalidating import
     'default_epg_days' => env('DEFAULT_EPG_DAYS', 7), // Default number of days to fetch for EPG generation
     'show_wan_details' => env('SHOW_WAN_DETAILS', null), // Show WAN details in admin panel
-    'crypto_addresses' => [
-        [
-            'name' => 'Bitcoin',
-            'symbol' => 'BTC',
-            'address' => '',
-            'icon' => '/images/crypto-icons/bitcoin.svg',
-        ],
-        [
-            'name' => 'Ethereum',
-            'symbol' => 'ETH',
-            'address' => '',
-            'icon' => '/images/crypto-icons/ethereum.svg',
-        ],
-        [
-            'name' => 'Solana',
-            'symbol' => 'SOL',
-            'address' => '',
-            'icon' => '/images/crypto-icons/solana.svg',
-        ],
-        [
-            'name' => 'Tether',
-            'symbol' => 'USDT',
-            'address' => '',
-            'icon' => '/images/crypto-icons/tether.svg',
-        ],
-        [
-            'name' => 'Litecoin',
-            'symbol' => 'LTC',
-            'address' => '',
-            'icon' => '/images/crypto-icons/litecoin.svg',
-        ],
-        [
-            'name' => 'Ripple',
-            'symbol' => 'XRP',
-            'address' => '',
-            'icon' => '/images/crypto-icons/ripple.svg',
-        ]
-    ]
+    'stuck_processing_minutes' => env('STUCK_PROCESSING_MINUTES', 120),
+    'auto_retry_503_enabled' => env('AUTO_RETRY_503_ENABLED', true),
+    'auto_retry_503_max' => env('AUTO_RETRY_503_MAX', 3),
+    'auto_retry_503_cooldown_minutes' => env('AUTO_RETRY_503_COOLDOWN_MINUTES', 10),
+    'auto_retry_503_delay_min_seconds' => env('AUTO_RETRY_503_DELAY_MIN_SECONDS', 300),
+    'auto_retry_503_delay_max_seconds' => env('AUTO_RETRY_503_DELAY_MAX_SECONDS', 900),
+
+    // restrict playlists to specific domains (comma separated list, supports wildcards, e.g. *.example.com)
+    'allowed_playlist_domains' => env('ALLOWED_PLAYLIST_DOMAINS', null),
 ];

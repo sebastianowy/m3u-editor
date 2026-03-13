@@ -44,12 +44,12 @@ class ProcessEpgSDImport implements ShouldQueue
             // Notify user we're starting the sync...
             Notification::make()
                 ->info()
-                ->title('Starting Schedules Direct Data Sync')
-                ->body("Schedules Direct Data Sync started for EPG \"{$epg->name}\".")
+                ->title('Starting SchedulesDirect Data Sync')
+                ->body("SchedulesDirect Data Sync started for EPG \"{$epg->name}\".")
                 ->broadcast($epg->user)
                 ->sendToDatabase($epg->user);
 
-            if (!$this->force) {
+            if (! $this->force) {
                 // If not forcing, check last modified time
                 $lastModified = Storage::disk('local')->exists($epg->file_path)
                     ? Storage::disk('local')->lastModified($epg->file_path)
@@ -58,7 +58,7 @@ class ProcessEpgSDImport implements ShouldQueue
                 if ($lastModified) {
                     $lastModifiedTime = Carbon::createFromTimestamp($lastModified);
                     $lastModifiedTime->addMinutes(10); // Add 10 minutes to last modified time
-                    if (!$lastModifiedTime->isPast()) { // If modified within the last 10 minutes, skip
+                    if (! $lastModifiedTime->isPast()) { // If modified within the last 10 minutes, skip
                         return true;
                     }
                 }
@@ -75,29 +75,30 @@ class ProcessEpgSDImport implements ShouldQueue
             // Notify user of success
             Notification::make()
                 ->success()
-                ->title('Schedules Direct Data Synced')
-                ->body("Schedules Direct Data Synced successfully for EPG \"{$epg->name}\". Completed in {$completedInRounded} seconds. Now parsing data and generating EPG cache...")
+                ->title('SchedulesDirect Data Synced')
+                ->body("SchedulesDirect Data Synced successfully for EPG \"{$epg->name}\". Completed in {$completedInRounded} seconds. Now parsing data and generating EPG cache...")
                 ->broadcast($epg->user)
                 ->sendToDatabase($epg->user);
 
             return true;
         } catch (Exception $e) {
             // Log the exception
-            logger()->error("Error processing Schedules Direct Data for EPG \"{$this->epg->name}\"");
+            logger()->error("Error processing SchedulesDirect Data for EPG \"{$this->epg->name}\"");
 
             // Send notification
-            $error = "Error: " . $e->getMessage();
+            $error = 'Error: '.$e->getMessage();
             Notification::make()
                 ->danger()
-                ->title("Error processing Schedules Direct Data for EPG \"{$this->epg->name}\"")
+                ->title("Error processing SchedulesDirect Data for EPG \"{$this->epg->name}\"")
                 ->body('Please view your notifications for details.')
                 ->broadcast($this->epg->user);
             Notification::make()
                 ->danger()
-                ->title("Error processing Schedules Direct Data for EPG \"{$this->epg->name}\"")
+                ->title("Error processing SchedulesDirect Data for EPG \"{$this->epg->name}\"")
                 ->body($error)
                 ->sendToDatabase($this->epg->user);
         }
+
         return false;
     }
 }

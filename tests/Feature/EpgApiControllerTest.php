@@ -41,15 +41,21 @@ class EpgApiControllerTest extends TestCase
         ]);
 
         // Create channels without EPG mapping (dummy EPG should be generated)
-        $channels = Channel::factory()->count(3)->create([
-            'playlist_id' => $this->playlist->id,
-            'user_id' => $this->user->id,
-            'group_id' => $group->id,
-            'enabled' => true,
-            'is_vod' => false,
-        ]);
+        // Explicitly set channel field to predictable values
+        $channels = collect();
+        for ($i = 1; $i <= 3; $i++) {
+            $channels->push(Channel::factory()->create([
+                'playlist_id' => $this->playlist->id,
+                'user_id' => $this->user->id,
+                'group_id' => $group->id,
+                'group' => 'Test Group', // Also set the string group field for dummy EPG category
+                'enabled' => true,
+                'is_vod' => false,
+                'channel' => 100 + $i, // Predictable channel numbers
+            ]));
+        }
 
-        $response = $this->getJson("/api/epg/playlist/{$this->playlist->uuid}");
+        $response = $this->getJson("/api/epg/playlist/{$this->playlist->uuid}/data");
 
         $response->assertSuccessful()
             ->assertJsonStructure([
@@ -67,7 +73,8 @@ class EpgApiControllerTest extends TestCase
 
         // Check that programmes were generated for each channel
         foreach ($channels as $channel) {
-            $channelId = $channel->channel ?? $channel->id;
+            $channel->refresh(); // Refresh to get latest data
+            $channelId = $channel->channel ?: $channel->id;
             $this->assertArrayHasKey($channelId, $data['programmes'], "Channel {$channelId} should have programmes");
 
             $programmes = $data['programmes'][$channelId];
@@ -100,17 +107,19 @@ class EpgApiControllerTest extends TestCase
             'user_id' => $this->user->id,
             'enabled' => true,
             'is_vod' => false,
+            'channel' => 998, // Explicit channel number
         ]);
 
         $startDate = Carbon::now()->format('Y-m-d');
         $endDate = Carbon::now()->addDay()->format('Y-m-d');
 
-        $response = $this->getJson("/api/epg/playlist/{$this->playlist->uuid}?start_date={$startDate}&end_date={$endDate}");
+        $response = $this->getJson("/api/epg/playlist/{$this->playlist->uuid}/data?start_date={$startDate}&end_date={$endDate}");
 
         $response->assertSuccessful();
 
         $data = $response->json();
-        $channelId = $channel->channel ?? $channel->id;
+        $channel->refresh(); // Refresh to get latest data
+        $channelId = $channel->channel ?: $channel->id;
         $programmes = $data['programmes'][$channelId] ?? [];
 
         $this->assertNotEmpty($programmes);
@@ -137,14 +146,16 @@ class EpgApiControllerTest extends TestCase
             'user_id' => $this->user->id,
             'enabled' => true,
             'is_vod' => false,
+            'channel' => 997, // Explicit channel number
         ]);
 
-        $response = $this->getJson("/api/epg/playlist/{$this->playlist->uuid}");
+        $response = $this->getJson("/api/epg/playlist/{$this->playlist->uuid}/data");
 
         $response->assertSuccessful();
 
         $data = $response->json();
-        $channelId = $channel->channel ?? $channel->id;
+        $channel->refresh(); // Refresh to get latest data
+        $channelId = $channel->channel ?: $channel->id;
 
         // Programmes should be empty or not include the channel without EPG
         $this->assertEmpty($data['programmes'][$channelId] ?? []);
@@ -167,14 +178,16 @@ class EpgApiControllerTest extends TestCase
             'group_id' => $group->id,
             'enabled' => true,
             'is_vod' => false,
+            'channel' => 996, // Explicit channel number
         ]);
 
-        $response = $this->getJson("/api/epg/playlist/{$this->playlist->uuid}");
+        $response = $this->getJson("/api/epg/playlist/{$this->playlist->uuid}/data");
 
         $response->assertSuccessful();
 
         $data = $response->json();
-        $channelId = $channel->channel ?? $channel->id;
+        $channel->refresh(); // Refresh to get latest data
+        $channelId = $channel->channel ?: $channel->id;
         $programmes = $data['programmes'][$channelId] ?? [];
 
         $this->assertNotEmpty($programmes);
@@ -186,6 +199,11 @@ class EpgApiControllerTest extends TestCase
 
     public function test_mixed_epg_and_dummy_epg_channels()
     {
+        // Create a group for both channels
+        $group = Group::factory()->create([
+            'user_id' => $this->user->id,
+        ]);
+
         // Create an EPG
         $epg = Epg::factory()->create([
             'user_id' => $this->user->id,
@@ -196,27 +214,37 @@ class EpgApiControllerTest extends TestCase
         $epgChannel = EpgChannel::factory()->create([
             'epg_id' => $epg->id,
             'channel_id' => 'test-channel-1',
+            'user_id' => $this->user->id,
         ]);
 
         // Create a channel with EPG mapping
+        // Set explicit sort values to ensure deterministic ordering
         $channelWithEpg = Channel::factory()->create([
             'playlist_id' => $this->playlist->id,
             'user_id' => $this->user->id,
+            'group_id' => $group->id,
             'enabled' => true,
             'is_vod' => false,
+            'epg_channel_id' => $epgChannel->id,
+            'sort' => 1,
+            'channel' => 1,
+            'title' => 'Channel A',
         ]);
-        $channelWithEpg->epgChannel()->associate($epgChannel);
-        $channelWithEpg->save();
 
         // Create a channel without EPG mapping (should get dummy EPG)
+        // Set explicit sort values to ensure deterministic ordering
         $channelWithoutEpg = Channel::factory()->create([
             'playlist_id' => $this->playlist->id,
             'user_id' => $this->user->id,
+            'group_id' => $group->id,
             'enabled' => true,
             'is_vod' => false,
+            'sort' => 2,
+            'channel' => 2,
+            'title' => 'Channel B',
         ]);
 
-        $response = $this->getJson("/api/epg/playlist/{$this->playlist->uuid}");
+        $response = $this->getJson("/api/epg/playlist/{$this->playlist->uuid}/data");
 
         $response->assertSuccessful();
 
@@ -226,6 +254,7 @@ class EpgApiControllerTest extends TestCase
         $this->assertCount(2, $data['channels']);
 
         // Channel without EPG should have dummy programmes
+        $channelWithoutEpg->refresh(); // Refresh to get latest data
         $channelId = $channelWithoutEpg->channel ?? $channelWithoutEpg->id;
         $this->assertArrayHasKey($channelId, $data['programmes']);
         $this->assertNotEmpty($data['programmes'][$channelId]);
@@ -233,16 +262,20 @@ class EpgApiControllerTest extends TestCase
 
     public function test_dummy_epg_respects_pagination()
     {
-        // Create multiple channels without EPG mapping
-        $channels = Channel::factory()->count(5)->create([
-            'playlist_id' => $this->playlist->id,
-            'user_id' => $this->user->id,
-            'enabled' => true,
-            'is_vod' => false,
-        ]);
+        // Create multiple channels without EPG mapping with unique channel numbers
+        $channels = collect();
+        for ($i = 1; $i <= 5; $i++) {
+            $channels->push(Channel::factory()->create([
+                'playlist_id' => $this->playlist->id,
+                'user_id' => $this->user->id,
+                'enabled' => true,
+                'is_vod' => false,
+                'channel' => 900 + $i, // Explicit unique channel numbers
+            ]));
+        }
 
         // Request first page with 2 items per page
-        $response = $this->getJson("/api/epg/playlist/{$this->playlist->uuid}?per_page=2&page=1");
+        $response = $this->getJson("/api/epg/playlist/{$this->playlist->uuid}/data?per_page=2&page=1");
 
         $response->assertSuccessful();
 
@@ -267,14 +300,17 @@ class EpgApiControllerTest extends TestCase
             'user_id' => $this->user->id,
             'enabled' => true,
             'is_vod' => false,
+            'channel' => 999, // Explicit channel number to avoid collisions
         ]);
 
-        $response = $this->getJson("/api/epg/playlist/{$this->playlist->uuid}");
+        $response = $this->getJson("/api/epg/playlist/{$this->playlist->uuid}/data");
 
         $response->assertSuccessful();
 
         $data = $response->json();
-        $channelId = $channel->channel ?? $channel->id;
+        $channel->refresh(); // Refresh to get latest data
+        // Use same logic as controller: falsy check with ?: not null-coalescing ??
+        $channelId = $channel->channel ?: $channel->id;
         $programmes = $data['programmes'][$channelId] ?? [];
 
         $this->assertNotEmpty($programmes);

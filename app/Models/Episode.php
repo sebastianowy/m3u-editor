@@ -3,15 +3,14 @@
 namespace App\Models;
 
 use App\Settings\GeneralSettings;
-use Exception;
 use Carbon\Carbon;
+use Exception;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\MorphMany;
 use Illuminate\Support\Facades\Log;
 use Symfony\Component\Process\Process as SymfonyProcess;
-use Illuminate\Support\Str;
 
 class Episode extends Model
 {
@@ -33,6 +32,7 @@ class Episode extends Model
         'season_id' => 'integer',
         'episode_num' => 'integer',
         'season' => 'integer',
+        'tmdb_id' => 'integer',
         'info' => 'array',
     ];
 
@@ -92,7 +92,7 @@ class Episode extends Model
         }
 
         return [
-            'id' => 'episode-' . $this->id,
+            'id' => 'episode-'.$this->id,
             'title' => $this->title,
             'url' => $url,
             'format' => $profile->format ?? $format,
@@ -109,9 +109,7 @@ class Episode extends Model
     {
         try {
             $url = $this->url;
-            $process = SymfonyProcess::fromShellCommandline(
-                "ffprobe -v quiet -print_format json -show_streams {$url}"
-            );
+            $process = new SymfonyProcess(['ffprobe', '-v', 'quiet', '-print_format', 'json', '-show_streams', $url]);
             $process->setTimeout(10);
             $output = '';
             $errors = '';
@@ -129,6 +127,7 @@ class Episode extends Model
             );
             if ($hasErrors) {
                 Log::error("Error running ffprobe for episode \"{$this->title}\": {$errors}");
+
                 return [];
             }
             $json = json_decode($output, true);
@@ -152,11 +151,13 @@ class Episode extends Model
                         ];
                     }
                 }
+
                 return $streamStats;
             }
         } catch (Exception $e) {
             Log::error("Error running ffprobe for episode \"{$this->title}\": {$e->getMessage()}");
         }
+
         return [];
     }
 
@@ -165,7 +166,7 @@ class Episode extends Model
      */
     public function getAddedAttribute($value)
     {
-        if (!$value) {
+        if (! $value) {
             return null;
         }
 

@@ -4,13 +4,13 @@ namespace App\Filament\Resources\Vods;
 
 use App\Facades\LogoFacade;
 use App\Facades\ProxyFacade;
-use App\Filament\Resources\EpgMaps\EpgMapResource;
+use App\Facades\SortFacade;
 use App\Filament\Resources\VodResource\Pages;
 use App\Filament\Resources\Vods\Pages\ListVod;
+use App\Filament\Resources\Vods\Pages\ViewVod;
 use App\Jobs\ChannelFindAndReplace;
 use App\Jobs\ChannelFindAndReplaceReset;
 use App\Jobs\FetchTmdbIds;
-use App\Jobs\MapPlaylistChannelsToEpg;
 use App\Jobs\ProcessVodChannels;
 use App\Jobs\SyncVodStrmFiles;
 use App\Models\Channel;
@@ -19,8 +19,10 @@ use App\Models\CustomPlaylist;
 use App\Models\Group;
 use App\Models\Playlist;
 use App\Rules\CheckIfUrlOrLocalPath;
+use App\Services\LogoCacheService;
 use App\Services\PlaylistService;
 use App\Settings\GeneralSettings;
+use App\Traits\HasUserFiltering;
 use Exception;
 use Filament\Actions\Action;
 use Filament\Actions\ActionGroup;
@@ -42,6 +44,7 @@ use Filament\Infolists\Components\IconEntry;
 use Filament\Infolists\Components\TextEntry;
 use Filament\Notifications\Notification;
 use Filament\Resources\Resource;
+use Filament\Schemas\Components\Actions;
 use Filament\Schemas\Components\Fieldset;
 use Filament\Schemas\Components\Grid;
 use Filament\Schemas\Components\Section;
@@ -63,13 +66,10 @@ use Illuminate\Database\Eloquent\Collection;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\ModelNotFoundException;
 use Illuminate\Database\QueryException;
-use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\HtmlString;
 use Illuminate\Support\Str;
 use Illuminate\Validation\ValidationException;
-use App\Traits\HasUserFiltering;
-use Filament\Support\Enums\Width;
 
 class VodResource extends Resource
 {
@@ -90,7 +90,7 @@ class VodResource extends Resource
             ->where('is_vod', true);
 
         // Filter by user_id for non-admin users
-        if (auth()->check() && !auth()->user()->isAdmin()) {
+        if (auth()->check() && ! auth()->user()->isAdmin()) {
             $query->where('user_id', auth()->id());
         }
 
@@ -103,7 +103,7 @@ class VodResource extends Resource
             ->where('is_vod', true);
 
         // Filter by user_id for non-admin users
-        if (auth()->check() && !auth()->user()->isAdmin()) {
+        if (auth()->check() && ! auth()->user()->isAdmin()) {
             $query->where('user_id', auth()->id());
         }
 
@@ -163,10 +163,10 @@ class VodResource extends Resource
                 ->label('Logo')
                 ->checkFileExistence(false)
                 ->size('inherit', 'inherit')
-                ->extraImgAttributes(fn($record): array => [
+                ->extraImgAttributes(fn ($record): array => [
                     'style' => 'width:80px; height:120px;', // VOD channel style
                 ])
-                ->getStateUsing(fn($record) => LogoFacade::getChannelLogoUrl($record))
+                ->getStateUsing(fn ($record) => LogoFacade::getChannelLogoUrl($record))
                 ->toggleable(),
             TextColumn::make('info')
                 ->label('Info')
@@ -182,7 +182,9 @@ class VodResource extends Resource
                     $html = "<span class='fi-ta-text-item-label whitespace-normal text-sm leading-6 text-gray-950 dark:text-white'>{$title}</span>";
                     if (is_array($info)) {
                         $description = Str::limit($info['description'] ?? $info['plot'] ?? '', 200);
-                        $html .= "<p class='text-sm text-gray-500 dark:text-gray-400 whitespace-normal mt-2'>{$description}</p>";
+                        if (! empty($description)) {
+                            $html .= "<p class='text-sm text-gray-500 dark:text-gray-400 whitespace-normal mt-2'>{$description}</p>";
+                        }
                     }
 
                     return new HtmlString($html);
@@ -195,11 +197,16 @@ class VodResource extends Resource
                 ->type('number')
                 ->placeholder('Sort Order')
                 ->sortable()
-                ->tooltip(fn($record) => ! $record->is_custom && $record->playlist?->auto_sort ? 'Playlist auto-sort enabled; any changes will be overwritten on next sync' : 'Channel sort order')
+                ->tooltip(fn ($record) => ! $record->is_custom && $record->playlist?->auto_sort ? 'Playlist auto-sort enabled; any changes will be overwritten on next sync' : 'Channel sort order')
                 ->toggleable(),
             ToggleColumn::make('enabled')
                 ->toggleable()
                 ->tooltip('Toggle channel status')
+                ->sortable(),
+            ToggleColumn::make('can_merge')
+                ->label('Merge Enabled')
+                ->toggleable()
+                ->tooltip('Toggle channel merge status during "Merge Same ID" jobs')
                 ->sortable(),
             TextColumn::make('failovers_count')
                 ->label('Failovers')
@@ -216,12 +223,38 @@ class VodResource extends Resource
 
                     return 'heroicon-o-minus';
                 })
-                ->color(fn($record): string => $record->has_metadata ? 'success' : 'gray'),
+                ->color(fn ($record): string => $record->has_metadata ? 'success' : 'gray'),
+            IconColumn::make('has_tmdb_id')
+                ->label('TMDB')
+                ->boolean()
+                ->trueIcon('heroicon-m-check-circle')
+                ->falseIcon('heroicon-m-minus-circle')
+                ->trueColor('success')
+                ->falseColor('gray')
+                ->tooltip(function ($record): string {
+                    $tmdbId = $record->info['tmdb_id'] ?? $record->movie_data['tmdb_id'] ?? null;
+                    $imdbId = $record->info['imdb_id'] ?? $record->movie_data['imdb_id'] ?? null;
+                    if ($tmdbId || $imdbId) {
+                        $ids = [];
+                        if ($tmdbId) {
+                            $ids[] = 'TMDB: '.$tmdbId;
+                        }
+                        if ($imdbId) {
+                            $ids[] = 'IMDB: '.$imdbId;
+                        }
+
+                        return implode(' | ', $ids);
+                    }
+
+                    return 'No TMDB/IMDB ID available';
+                })
+                ->getStateUsing(fn ($record) => ! empty($record->info['tmdb_id'] ?? $record->movie_data['tmdb_id'] ?? null))
+                ->toggleable(),
             TextInputColumn::make('stream_id_custom')
                 ->label('ID')
                 ->rules(['min:0', 'max:255'])
-                ->tooltip(fn($record) => $record->stream_id)
-                ->placeholder(fn($record) => $record->stream_id)
+                ->tooltip(fn ($record) => $record->stream_id)
+                ->placeholder(fn ($record) => $record->stream_id)
                 ->searchable()
                 ->sortable(query: function (Builder $query, string $direction): Builder {
                     return $query
@@ -232,8 +265,8 @@ class VodResource extends Resource
             TextInputColumn::make('title_custom')
                 ->label('Title')
                 ->rules(['min:0', 'max:255'])
-                ->tooltip(fn($record) => $record->title)
-                ->placeholder(fn($record) => $record->title)
+                ->tooltip(fn ($record) => $record->title)
+                ->placeholder(fn ($record) => $record->title)
                 ->searchable()
                 ->sortable(query: function (Builder $query, string $direction): Builder {
                     return $query
@@ -244,10 +277,10 @@ class VodResource extends Resource
             TextInputColumn::make('name_custom')
                 ->label('Name')
                 ->rules(['min:0', 'max:255'])
-                ->tooltip(fn($record) => $record->name)
-                ->placeholder(fn($record) => $record->name)
+                ->tooltip(fn ($record) => $record->name)
+                ->placeholder(fn ($record) => $record->name)
                 ->searchable(query: function (Builder $query, string $search): Builder {
-                    return $query->orWhereRaw('LOWER(channels.name_custom) LIKE ?', ['%' . strtolower($search) . '%']);
+                    return $query->orWhereRaw('LOWER(channels.name_custom) LIKE ?', ['%'.strtolower($search).'%']);
                 })
                 ->sortable(query: function (Builder $query, string $direction): Builder {
                     return $query
@@ -267,7 +300,7 @@ class VodResource extends Resource
                 ->rules(['url'])
                 ->type('url')
                 ->tooltip('Channel url')
-                ->placeholder(fn($record) => $record->url)
+                ->placeholder(fn ($record) => $record->url)
                 ->searchable()
                 ->toggleable(),
             TextInputColumn::make('shift')
@@ -279,7 +312,7 @@ class VodResource extends Resource
                 ->toggleable()
                 ->sortable(),
             TextColumn::make('group')
-                ->hidden(fn() => ! $showGroup)
+                ->hidden(fn () => ! $showGroup)
                 ->badge()
                 ->toggleable()
                 ->searchable(query: function ($query, string $search): Builder {
@@ -298,16 +331,6 @@ class VodResource extends Resource
                             return $query->orWhere(DB::raw('LOWER(group)'), 'LIKE', "%{$search}%");
                     }
                 })
-                ->sortable(),
-            TextColumn::make('epgChannel.name')
-                ->label('EPG Channel')
-                ->toggleable()
-                ->searchable(query: function (Builder $query, string $search): Builder {
-                    return $query->orWhereHas('epgChannel', function (Builder $query) use ($search) {
-                        $query->whereRaw('LOWER(epg_channels.name) LIKE ?', ['%' . strtolower($search) . '%']);
-                    });
-                })
-                ->limit(40)
                 ->sortable(),
             TextInputColumn::make('tvg_shift')
                 ->label('EPG Shift')
@@ -334,7 +357,7 @@ class VodResource extends Resource
                 ->toggleable(isToggledHiddenByDefault: true)
                 ->sortable(),
             TextColumn::make('playlist.name')
-                ->hidden(fn() => ! $showPlaylist)
+                ->hidden(fn () => ! $showPlaylist)
                 ->numeric()
                 ->toggleable()
                 ->sortable(),
@@ -353,13 +376,15 @@ class VodResource extends Resource
                 ->label('Default Name')
                 ->sortable()
                 ->searchable(query: function (Builder $query, string $search): Builder {
-                    return $query->orWhereRaw('LOWER(channels.name) LIKE ?', ['%' . strtolower($search) . '%']);
+                    return $query->orWhereRaw('LOWER(channels.name) LIKE ?', ['%'.strtolower($search).'%']);
                 })
                 ->toggleable(isToggledHiddenByDefault: true),
             TextColumn::make('url')
                 ->label('Default URL')
                 ->sortable()
-                ->searchable()
+                ->searchable(query: function (Builder $query, string $search): Builder {
+                    return $query->orWhereRaw('LOWER(channels.url::text) LIKE ?', ['%'.strtolower($search).'%']);
+                })
                 ->toggleable(isToggledHiddenByDefault: true),
 
             TextColumn::make('created_at')
@@ -378,7 +403,7 @@ class VodResource extends Resource
         return [
             SelectFilter::make('playlist')
                 ->relationship('playlist', 'name')
-                ->hidden(fn() => ! $showPlaylist)
+                ->hidden(fn () => ! $showPlaylist)
                 ->multiple()
                 ->preload()
                 ->searchable(),
@@ -414,6 +439,42 @@ class VodResource extends Resource
                         ['movie_data', '=', null],
                     ]);
                 }),
+            Filter::make('has_tmdb_id')
+                ->label('Has TMDB/IMDB ID')
+                ->toggle()
+                ->query(function ($query) {
+                    return $query->where('is_vod', true)
+                        ->where(function ($q) {
+                            $q->whereRaw("info::jsonb ?? 'tmdb_id'")
+                                ->orWhereRaw("movie_data::jsonb ?? 'tmdb_id'")
+                                ->orWhereRaw("info::jsonb ?? 'imdb_id'")
+                                ->orWhereRaw("movie_data::jsonb ?? 'imdb_id'");
+                        });
+                }),
+            Filter::make('missing_tmdb_id')
+                ->label('Missing TMDB/IMDB ID')
+                ->toggle()
+                ->query(function ($query) {
+                    return $query->where('is_vod', true)
+                        ->where(function ($q) {
+                            $q->where(function ($inner) {
+                                $inner->whereNull('info')
+                                    ->orWhereRaw("NOT (info::jsonb ?? 'tmdb_id')");
+                            })
+                                ->where(function ($inner) {
+                                    $inner->whereNull('movie_data')
+                                        ->orWhereRaw("NOT (movie_data::jsonb ?? 'tmdb_id')");
+                                })
+                                ->where(function ($inner) {
+                                    $inner->whereNull('info')
+                                        ->orWhereRaw("NOT (info::jsonb ?? 'imdb_id')");
+                                })
+                                ->where(function ($inner) {
+                                    $inner->whereNull('movie_data')
+                                        ->orWhereRaw("NOT (movie_data::jsonb ?? 'imdb_id')");
+                                });
+                        });
+                }),
             Filter::make('mapped')
                 ->label('EPG is mapped')
                 ->toggle()
@@ -433,12 +494,115 @@ class VodResource extends Resource
     {
         return [
             ActionGroup::make([
-                EditAction::make('edit')
+                Action::make('fetch_tmdb_ids')
+                    ->label('Fetch TMDB/TVDB IDs')
+                    ->icon('heroicon-o-film')
+                    ->modalIcon('heroicon-o-film')
+                    ->modalDescription('Fetch TMDB, TVDB, and IMDB IDs for this series from The Movie Database.')
+                    ->modalSubmitActionLabel('Fetch IDs now')
+                    ->action(function ($record) {
+                        app('Illuminate\Contracts\Bus\Dispatcher')
+                            ->dispatch(new FetchTmdbIds(
+                                vodChannelIds: [$record->id]
+                            ));
+                    })
+                    ->after(function () {
+                        Notification::make()
+                            ->success()
+                            ->title('TMDB Search Started')
+                            ->body('Searching for TMDB/TVDB IDs. Check the logs or refresh the page in a few seconds.')
+                            ->duration(8000)
+                            ->send();
+                    })
+                    ->requiresConfirmation(),
+                Action::make('manual_tmdb_search')
+                    ->label('Manual TMDB Search')
+                    ->icon('heroicon-o-magnifying-glass')
                     ->slideOver()
-                    ->schema(fn(EditAction $action): array => [
-                        Grid::make()
-                            ->schema(self::getForm(edit: true))
-                            ->columns(2),
+                    ->modalWidth('4xl')
+                    ->modalSubmitAction(false)
+                    ->modalCancelActionLabel('Close')
+                    ->fillForm(fn ($record) => [
+                        'search_query' => $record->title_custom ?: $record->title ?: $record->name,
+                        'search_year' => $record->year ?? ($record->info['releasedate'] ?? null ? (int) substr($record->info['releasedate'], 0, 4) : null),
+                        'vod_id' => $record->id,
+                        'current_tmdb_id' => $record->info['tmdb_id'] ?? $record->movie_data['tmdb_id'] ?? null,
+                        'current_imdb_id' => $record->info['imdb_id'] ?? $record->movie_data['imdb_id'] ?? null,
+                    ])
+                    ->schema([
+                        Section::make('Current IDs')
+                            ->description('Currently stored external IDs for this VOD')
+                            ->schema([
+                                Grid::make(2)
+                                    ->schema([
+                                        Forms\Components\TextInput::make('current_tmdb_id')
+                                            ->label('TMDB ID')
+                                            ->disabled()
+                                            ->placeholder('Not set'),
+                                        Forms\Components\TextInput::make('current_imdb_id')
+                                            ->label('IMDB ID')
+                                            ->disabled()
+                                            ->placeholder('Not set'),
+                                    ]),
+                            ])
+                            ->collapsible()
+                            ->collapsed(),
+                        Section::make('Search TMDB')
+                            ->description('Search The Movie Database for this movie')
+                            ->schema([
+                                Grid::make(3)
+                                    ->schema([
+                                        Forms\Components\TextInput::make('search_query')
+                                            ->label('Search Query')
+                                            ->placeholder('Enter movie name...')
+                                            ->required()
+                                            ->columnSpan(2),
+                                        Forms\Components\TextInput::make('search_year')
+                                            ->label('Year (optional)')
+                                            ->numeric()
+                                            ->minValue(1900)
+                                            ->maxValue(2100)
+                                            ->placeholder('e.g. 2024'),
+                                    ]),
+                                Actions::make([
+                                    Action::make('search_tmdb')
+                                        ->label('Search TMDB')
+                                        ->icon('heroicon-o-magnifying-glass')
+                                        ->action(function (Get $get, Set $set) {
+                                            $query = $get('search_query');
+                                            $year = $get('search_year');
+
+                                            if (empty($query)) {
+                                                Notification::make()
+                                                    ->warning()
+                                                    ->title('Please enter a search query')
+                                                    ->send();
+
+                                                return;
+                                            }
+
+                                            try {
+                                                $tmdbService = app(\App\Services\TmdbService::class);
+                                                $results = $tmdbService->searchMovieManual($query, $year);
+                                                $set('search_results', $results);
+                                            } catch (\Exception $e) {
+                                                Notification::make()
+                                                    ->danger()
+                                                    ->title('Search Error')
+                                                    ->body($e->getMessage())
+                                                    ->send();
+                                            }
+                                        }),
+                                ])->fullWidth(),
+                            ]),
+                        Section::make('Search Results')
+                            ->description('Click on a result to apply the TMDB IDs')
+                            ->schema([
+                                Forms\Components\Hidden::make('vod_id'),
+                                \App\Forms\Components\TmdbSearchResults::make('search_results')
+                                    ->type('movie')
+                                    ->default([]),
+                            ]),
                     ]),
                 Action::make('process_vod')
                     ->label('Fetch Metadata')
@@ -449,11 +613,11 @@ class VodResource extends Resource
                             ->helperText('Overwrite existing metadata? If disabled, it will only fetch and process metadata if it does not already exist.')
                             ->default(false),
                     ])
-                    ->action(function ($record) {
+                    ->action(function ($record, array $data) {
                         app('Illuminate\Contracts\Bus\Dispatcher')
                             ->dispatch(new ProcessVodChannels(
                                 channel: $record,
-                                force: $record->overwrite_existing ?? false
+                                force: $data['overwrite_existing'] ?? false
                             ));
                     })->after(function () {
                         Notification::make()
@@ -493,6 +657,16 @@ class VodResource extends Resource
                     ->modalDescription('Are you sure you want to delete this VOD channel? This action cannot be undone.')
                     ->modalSubmitActionLabel('Yes, delete VOD'),
             ])->button()->hiddenLabel()->size('sm'),
+            EditAction::make('edit')
+                ->slideOver()
+                ->schema(fn (EditAction $action): array => [
+                    Grid::make()
+                        ->schema(self::getForm(edit: true))
+                        ->columns(2),
+                ])
+                ->button()->hiddenLabel()->size('sm')
+                    // Refresh table after edit to remove records that no longer match active filters
+                ->after(fn ($livewire) => $livewire->dispatch('$refresh')),
             Action::make('play')
                 ->tooltip('Play Video')
                 ->action(function ($record, $livewire) {
@@ -503,71 +677,21 @@ class VodResource extends Resource
                 ->hiddenLabel()
                 ->size('sm'),
             ViewAction::make()
+                ->url(fn ($record) => static::getUrl('view', ['record' => $record]))
                 ->button()
-                ->icon('heroicon-s-information-circle')
+                ->icon('heroicon-s-eye')
                 ->hiddenLabel()
-                ->slideOver(),
+                ->tooltip('View enhanced details')
+                ->size('sm'),
         ];
     }
 
-    public static function getTableBulkActions($addToCustom = true): array
+    public static function getTableBulkActions($addToCustom = true, bool $includeRecount = true): array
     {
         return [
             BulkActionGroup::make([
-                BulkAction::make('add')
-                    ->label('Add to Custom Playlist')
-                    ->schema([
-                        Select::make('playlist')
-                            ->required()
-                            ->live()
-                            ->label('Custom Playlist')
-                            ->helperText('Select the custom playlist you would like to add the selected channel(s) to.')
-                            ->options(CustomPlaylist::where(['user_id' => auth()->id()])->get(['name', 'id'])->pluck('name', 'id'))
-                            ->afterStateUpdated(function (Set $set, $state) {
-                                if ($state) {
-                                    $set('category', null);
-                                }
-                            })
-                            ->searchable(),
-                        Select::make('category')
-                            ->label('Custom Group')
-                            ->disabled(fn(Get $get) => ! $get('playlist'))
-                            ->helperText(fn(Get $get) => ! $get('playlist') ? 'Select a custom playlist first.' : 'Select the group you would like to assign to the selected channel(s) to.')
-                            ->options(function ($get) {
-                                $customList = CustomPlaylist::find($get('playlist'));
-
-                                return $customList ? $customList->groupTags()->get()
-                                    ->mapWithKeys(fn($tag) => [$tag->getAttributeValue('name') => $tag->getAttributeValue('name')])
-                                    ->toArray() : [];
-                            })
-                            ->searchable(),
-                    ])
-                    ->action(function (Collection $records, array $data): void {
-                        $playlist = CustomPlaylist::findOrFail($data['playlist']);
-                        $playlist->channels()->syncWithoutDetaching($records->pluck('id'));
-                        if ($data['category']) {
-                            $tags = $playlist->groupTags()->get();
-                            $tag = $playlist->groupTags()->where('name->en', $data['category'])->first();
-                            foreach ($records as $record) {
-                                // Need to detach any existing tags from this playlist first
-                                $record->detachTags($tags);
-                                $record->attachTag($tag);
-                            }
-                        }
-                    })->after(function () {
-                        Notification::make()
-                            ->success()
-                            ->title('Channels added to custom playlist')
-                            ->body('The selected channels have been added to the chosen custom playlist.')
-                            ->send();
-                    })
-                    ->hidden(fn() => ! $addToCustom)
-                    ->deselectRecordsAfterCompletion()
-                    ->requiresConfirmation()
-                    ->icon('heroicon-o-play')
-                    ->modalIcon('heroicon-o-play')
-                    ->modalDescription('Add the selected channel(s) to the chosen custom playlist.')
-                    ->modalSubmitActionLabel('Add now'),
+                PlaylistService::getAddToPlaylistBulkAction('add', 'channel')
+                    ->hidden(fn () => ! $addToCustom),
                 BulkAction::make('move')
                     ->label('Move to Group')
                     ->schema([
@@ -585,14 +709,14 @@ class VodResource extends Resource
                             ->required()
                             ->live()
                             ->label('Group')
-                            ->helperText(fn(Get $get) => $get('playlist') === null ? 'Select a playlist first...' : 'Select the group you would like to move the items to.')
-                            ->options(fn(Get $get) => Group::where([
+                            ->helperText(fn (Get $get) => $get('playlist') === null ? 'Select a playlist first...' : 'Select the group you would like to move the items to.')
+                            ->options(fn (Get $get) => Group::where([
                                 'type' => 'vod',
                                 'user_id' => auth()->id(),
-                                'playlist_id' => $get('playlist')
+                                'playlist_id' => $get('playlist'),
                             ])->get(['name', 'id'])->pluck('name', 'id'))
                             ->searchable()
-                            ->disabled(fn(Get $get) => $get('playlist') === null),
+                            ->disabled(fn (Get $get) => $get('playlist') === null),
                     ])
                     ->action(function (Collection $records, array $data): void {
                         $filtered = $records->where('playlist_id', $data['playlist']);
@@ -616,131 +740,6 @@ class VodResource extends Resource
                     ->modalIcon('heroicon-o-arrows-right-left')
                     ->modalDescription('Move the selected channel(s) to the chosen group.')
                     ->modalSubmitActionLabel('Move now'),
-                BulkAction::make('process_vod')
-                    ->label('Fetch Metadata')
-                    ->icon('heroicon-o-arrow-down-tray')
-                    ->schema([
-                        Toggle::make('overwrite_existing')
-                            ->label('Overwrite Existing Metadata')
-                            ->helperText('Overwrite existing metadata? If disabled, it will only fetch and process metadata if it does not already exist.')
-                            ->default(false),
-                    ])
-                    ->action(function ($records, $data) {
-                        $count = 0;
-                        foreach ($records as $record) {
-                            if ($record->is_vod) {
-                                $count++;
-                                app('Illuminate\Contracts\Bus\Dispatcher')
-                                    ->dispatch(new ProcessVodChannels(
-                                        channel: $record,
-                                        force: $data['overwrite_existing'] ?? false
-                                    ));
-                            }
-                        }
-
-                        Notification::make()
-                            ->success()
-                            ->title("Fetching VOD metadata for {$count} channel(s)")
-                            ->body('The VOD metadata fetching and processing has been started. You will be notified when it is complete.')
-                            ->duration(10000)
-                            ->send();
-                    })
-                    ->deselectRecordsAfterCompletion()
-                    ->requiresConfirmation()
-                    ->icon('heroicon-o-arrow-down-tray')
-                    ->modalIcon('heroicon-o-arrow-down-tray')
-                    ->modalDescription('Fetch and process VOD metadata for the selected channels? Only enabled VOD channels will be processed.')
-                    ->modalSubmitActionLabel('Yes, process now'),
-                BulkAction::make('fetch_tmdb_ids')
-                    ->label('Fetch TMDB IDs')
-                    ->icon('heroicon-o-magnifying-glass')
-                    ->schema([
-                        Toggle::make('overwrite_existing')
-                            ->label('Overwrite Existing IDs')
-                            ->helperText('Overwrite existing TMDB/IMDB IDs? If disabled, it will only fetch IDs for items that don\'t already have them.')
-                            ->default(false),
-                    ])
-                    ->action(function ($records, $data) {
-                        $settings = app(GeneralSettings::class);
-                        if (empty($settings->tmdb_api_key)) {
-                            Notification::make()
-                                ->danger()
-                                ->title('TMDB API Key Required')
-                                ->body('Please configure your TMDB API key in Settings > TMDB before using this feature.')
-                                ->duration(10000)
-                                ->send();
-                            return;
-                        }
-
-                        $vodIds = $records->pluck('id')->toArray();
-
-                        app('Illuminate\Contracts\Bus\Dispatcher')
-                            ->dispatch(new FetchTmdbIds(
-                                vodChannelIds: $vodIds,
-                                seriesIds: null,
-                                overwriteExisting: $data['overwrite_existing'] ?? false,
-                                user: auth()->user(),
-                            ));
-
-                        Notification::make()
-                            ->success()
-                            ->title("Fetching TMDB IDs for " . count($vodIds) . " VOD channel(s)")
-                            ->body('The TMDB ID lookup has been started. You will be notified when it is complete.')
-                            ->duration(10000)
-                            ->send();
-                    })
-                    ->deselectRecordsAfterCompletion()
-                    ->requiresConfirmation()
-                    ->modalIcon('heroicon-o-magnifying-glass')
-                    ->modalDescription('Search TMDB for matching movies and populate TMDB/IMDB IDs for the selected VOD channels? This enables Trash Guides compatibility for Radarr/Sonarr.')
-                    ->modalSubmitActionLabel('Yes, fetch IDs now'),
-                BulkAction::make('sync')
-                    ->label('Sync VOD .strm files')
-                    ->action(function ($records) {
-                        foreach ($records as $record) {
-                            app('Illuminate\Contracts\Bus\Dispatcher')
-                                ->dispatch(new SyncVodStrmFiles(
-                                    channel: $record,
-                                ));
-                        }
-                    })->after(function () {
-                        Notification::make()
-                            ->success()
-                            ->title('.strm files are being synced for selected VOD channels')
-                            ->body('You will be notified once complete.')
-                            ->duration(10000)
-                            ->send();
-                    })
-                    ->requiresConfirmation()
-                    ->icon('heroicon-o-document-arrow-down')
-                    ->modalIcon('heroicon-o-document-arrow-down')
-                    ->modalDescription('Sync selected VOD .strm files now? This will generate .strm files for the selected VOD channels at the path set for the channels.')
-                    ->modalSubmitActionLabel('Yes, sync now'),
-                BulkAction::make('map')
-                    ->label('Map EPG to selected')
-                    ->schema(EpgMapResource::getForm(showPlaylist: false, showEpg: true))
-                    ->action(function (Collection $records, array $data): void {
-                        app('Illuminate\Contracts\Bus\Dispatcher')
-                            ->dispatch(new MapPlaylistChannelsToEpg(
-                                epg: (int) $data['epg_id'],
-                                channels: $records->pluck('id')->toArray(),
-                                force: $data['override'],
-                                settings: $data['settings'] ?? [],
-                            ));
-                    })->after(function () {
-                        Notification::make()
-                            ->success()
-                            ->title('EPG to Channel mapping')
-                            ->body('Mapping started, you will be notified when the process is complete.')
-                            ->send();
-                    })
-                    ->deselectRecordsAfterCompletion()
-                    ->requiresConfirmation()
-                    ->icon('heroicon-o-link')
-                    ->modalIcon('heroicon-o-link')
-                    ->modalWidth(Width::FourExtraLarge)
-                    ->modalDescription('Map the selected EPG to the selected channel(s).')
-                    ->modalSubmitActionLabel('Map now'),
                 BulkAction::make('preferred_logo')
                     ->label('Update preferred icon')
                     ->schema([
@@ -772,6 +771,61 @@ class VodResource extends Resource
                     ->modalIcon('heroicon-o-photo')
                     ->modalDescription('Update the preferred icon for the selected channel(s).')
                     ->modalSubmitActionLabel('Update now'),
+                BulkAction::make('set_logo_override_url')
+                    ->label('Set logo override URL')
+                    ->schema([
+                        TextInput::make('logo')
+                            ->label('Logo override URL')
+                            ->url()
+                            ->nullable()
+                            ->helperText('Leave empty to remove the custom logo and use provider/EPG logo.'),
+                    ])
+                    ->action(function (Collection $records, array $data): void {
+                        Channel::whereIn('id', $records->pluck('id')->toArray())
+                            ->update([
+                                'logo' => empty($data['logo']) ? null : $data['logo'],
+                            ]);
+                    })->after(function () {
+                        Notification::make()
+                            ->success()
+                            ->title('Logo override updated')
+                            ->body('The logo override URL has been updated for the selected VOD channels.')
+                            ->send();
+                    })
+                    ->deselectRecordsAfterCompletion()
+                    ->requiresConfirmation()
+                    ->icon('heroicon-o-link')
+                    ->modalIcon('heroicon-o-link')
+                    ->modalDescription('Apply a single logo override URL to all selected VOD channels. Leave empty to remove overrides.')
+                    ->modalSubmitActionLabel('Apply URL'),
+                BulkAction::make('refresh_logo_cache')
+                    ->label('Refresh logo cache (selected)')
+                    ->action(function (Collection $records): void {
+                        $urls = [];
+
+                        foreach ($records as $record) {
+                            $urls[] = $record->logo;
+                            $urls[] = $record->logo_internal;
+                            $urls[] = $record->epgChannel?->icon_custom;
+                            $urls[] = $record->epgChannel?->icon;
+                            $urls[] = $record->info['movie_image'] ?? null;
+                            $urls[] = $record->info['cover_big'] ?? null;
+                        }
+
+                        $cleared = LogoCacheService::clearByUrls($urls);
+
+                        Notification::make()
+                            ->success()
+                            ->title('Selected VOD cache refreshed')
+                            ->body("Removed {$cleared} cache file(s) for selected VOD resources.")
+                            ->send();
+                    })
+                    ->deselectRecordsAfterCompletion()
+                    ->requiresConfirmation()
+                    ->icon('heroicon-o-arrow-path')
+                    ->modalIcon('heroicon-o-arrow-path')
+                    ->modalDescription('Clear cached logos and poster images for selected VOD channels so they are fetched again on the next request.')
+                    ->modalSubmitActionLabel('Refresh selected cache'),
                 BulkAction::make('failover')
                     ->label('Add as failover')
                     ->schema(function (Collection $records) {
@@ -802,13 +856,13 @@ class VodResource extends Resource
                                 ->helperText('From the selected channels')
                                 ->options($initialMasterOptions)
                                 ->required()
-                                ->hidden(fn(Get $get) => $get('master_source') !== 'selected')
+                                ->hidden(fn (Get $get) => $get('master_source') !== 'selected')
                                 ->searchable(),
                             Select::make('master_channel_id')
                                 ->label('Search for master channel')
                                 ->searchable()
                                 ->required()
-                                ->hidden(fn(Get $get) => $get('master_source') !== 'searched')
+                                ->hidden(fn (Get $get) => $get('master_source') !== 'searched')
                                 ->getSearchResultsUsing(function (string $search) use ($existingFailoverIds) {
                                     $searchLower = strtolower($search);
                                     $channels = auth()->user()->channels()
@@ -868,6 +922,133 @@ class VodResource extends Resource
                     ->modalIcon('heroicon-o-arrow-path-rounded-square')
                     ->modalDescription('Add the selected channel(s) to the chosen channel as failover sources.')
                     ->modalSubmitActionLabel('Add failovers now'),
+                ...($includeRecount ? [
+                    BulkAction::make('recount')
+                        ->label('Recount Channels')
+                        ->icon('heroicon-o-hashtag')
+                        ->schema([
+                            TextInput::make('start')
+                                ->label('Start Number')
+                                ->numeric()
+                                ->default(1)
+                                ->required(),
+                        ])
+                        ->action(function (Collection $records, array $data): void {
+                            $start = (int) $data['start'];
+                            SortFacade::bulkRecountChannels($records, $start);
+                        })
+                        ->after(function ($livewire) {
+                            Notification::make()
+                                ->success()
+                                ->title('Channels Recounted')
+                                ->body('The selected channels have been recounted.')
+                                ->send();
+                        })
+                        ->requiresConfirmation()
+                        ->modalIcon('heroicon-o-hashtag')
+                        ->modalDescription('Recount the selected channels sequentially? Channel numbers will be assigned based on the current sort order.'),
+                ] : []),
+                BulkAction::make('process_vod')
+                    ->label('Fetch Metadata')
+                    ->icon('heroicon-o-arrow-down-tray')
+                    ->schema([
+                        Toggle::make('overwrite_existing')
+                            ->label('Overwrite Existing Metadata')
+                            ->helperText('Overwrite existing metadata? If disabled, it will only fetch and process metadata if it does not already exist.')
+                            ->default(false),
+                    ])
+                    ->action(function ($records, $data) {
+                        $count = 0;
+                        foreach ($records as $record) {
+                            if ($record->is_vod) {
+                                $count++;
+                                app('Illuminate\Contracts\Bus\Dispatcher')
+                                    ->dispatch(new ProcessVodChannels(
+                                        channel: $record,
+                                        force: $data['overwrite_existing'] ?? false
+                                    ));
+                            }
+                        }
+
+                        Notification::make()
+                            ->success()
+                            ->title("Fetching VOD metadata for {$count} channel(s)")
+                            ->body('The VOD metadata fetching and processing has been started. You will be notified when it is complete.')
+                            ->duration(10000)
+                            ->send();
+                    })
+                    ->deselectRecordsAfterCompletion()
+                    ->requiresConfirmation()
+                    ->icon('heroicon-o-arrow-down-tray')
+                    ->modalIcon('heroicon-o-arrow-down-tray')
+                    ->modalDescription('Fetch and process VOD metadata for the selected channels? Only enabled VOD channels will be processed.')
+                    ->modalSubmitActionLabel('Yes, process now'),
+                BulkAction::make('fetch_tmdb_ids')
+                    ->label('Fetch TMDB IDs')
+                    ->icon('heroicon-o-magnifying-glass')
+                    ->schema([
+                        Toggle::make('overwrite_existing')
+                            ->label('Overwrite Existing IDs')
+                            ->helperText('Overwrite existing TMDB/IMDB IDs? If disabled, it will only fetch IDs for items that don\'t already have them.')
+                            ->default(false),
+                    ])
+                    ->action(function ($records, $data) {
+                        $settings = app(GeneralSettings::class);
+                        if (empty($settings->tmdb_api_key)) {
+                            Notification::make()
+                                ->danger()
+                                ->title('TMDB API Key Required')
+                                ->body('Please configure your TMDB API key in Settings > TMDB before using this feature.')
+                                ->duration(10000)
+                                ->send();
+
+                            return;
+                        }
+
+                        $vodIds = $records->pluck('id')->toArray();
+
+                        app('Illuminate\Contracts\Bus\Dispatcher')
+                            ->dispatch(new FetchTmdbIds(
+                                vodChannelIds: $vodIds,
+                                seriesIds: null,
+                                overwriteExisting: $data['overwrite_existing'] ?? false,
+                                user: auth()->user(),
+                            ));
+
+                        Notification::make()
+                            ->success()
+                            ->title('Fetching TMDB IDs for '.count($vodIds).' VOD channel(s)')
+                            ->body('The TMDB ID lookup has been started. You will be notified when it is complete.')
+                            ->duration(10000)
+                            ->send();
+                    })
+                    ->deselectRecordsAfterCompletion()
+                    ->requiresConfirmation()
+                    ->modalIcon('heroicon-o-magnifying-glass')
+                    ->modalDescription('Search TMDB for matching movies and populate TMDB/IMDB IDs for the selected VOD channels? This enables Trash Guides compatibility for Radarr/Sonarr.')
+                    ->modalSubmitActionLabel('Yes, fetch IDs now'),
+                BulkAction::make('sync')
+                    ->label('Sync VOD .strm files')
+                    ->action(function ($records) {
+                        foreach ($records as $record) {
+                            app('Illuminate\Contracts\Bus\Dispatcher')
+                                ->dispatch(new SyncVodStrmFiles(
+                                    channel: $record,
+                                ));
+                        }
+                    })->after(function () {
+                        Notification::make()
+                            ->success()
+                            ->title('.strm files are being synced for selected VOD channels')
+                            ->body('You will be notified once complete.')
+                            ->duration(10000)
+                            ->send();
+                    })
+                    ->requiresConfirmation()
+                    ->icon('heroicon-o-document-arrow-down')
+                    ->modalIcon('heroicon-o-document-arrow-down')
+                    ->modalDescription('Sync selected VOD .strm files now? This will generate .strm files for the selected VOD channels at the path set for the channels.')
+                    ->modalSubmitActionLabel('Yes, sync now'),
                 BulkAction::make('find-replace')
                     ->label('Find & Replace')
                     ->schema([
@@ -888,14 +1069,14 @@ class VodResource extends Resource
                             ->required()
                             ->columnSpan(1),
                         TextInput::make('find_replace')
-                            ->label(fn(Get $get) => ! $get('use_regex') ? 'String to replace' : 'Pattern to replace')
+                            ->label(fn (Get $get) => ! $get('use_regex') ? 'String to replace' : 'Pattern to replace')
                             ->required()
                             ->placeholder(
-                                fn(Get $get) => $get('use_regex')
+                                fn (Get $get) => $get('use_regex')
                                     ? '^(US- |UK- |CA- )'
                                     : 'US -'
                             )->helperText(
-                                fn(Get $get) => ! $get('use_regex')
+                                fn (Get $get) => ! $get('use_regex')
                                     ? 'This is the string you want to find and replace.'
                                     : 'This is the regex pattern you want to find. Make sure to use valid regex syntax.'
                             ),
@@ -962,6 +1143,47 @@ class VodResource extends Resource
                     ->modalIcon('heroicon-o-arrow-uturn-left')
                     ->modalDescription('Reset Find & Replace results back to playlist defaults for the selected channels. This will remove any custom values set in the selected column.')
                     ->modalSubmitActionLabel('Reset now'),
+                BulkAction::make('enable-merge')
+                    ->label('Enable Merge')
+                    ->action(function (Collection $records, array $data): void {
+                        $records->each(fn ($channel) => $channel->update([
+                            'can_merge' => true,
+                        ]));
+                    })->after(function () {
+                        Notification::make()
+                            ->success()
+                            ->title('Merge re-enabled for selected channels')
+                            ->body('The merge has been re-enabled for the selected channels. They can now be merged during "Merge Same ID" jobs.')
+                            ->send();
+                    })
+                    ->hidden(fn () => ! $addToCustom)
+                    ->deselectRecordsAfterCompletion()
+                    ->requiresConfirmation()
+                    ->icon('heroicon-o-arrows-pointing-in')
+                    ->modalIcon('heroicon-o-arrows-pointing-in')
+                    ->modalDescription('Allow merging for selected channels when running "Merge Same ID" jobs.')
+                    ->modalSubmitActionLabel('Enable now'),
+                BulkAction::make('disable-merge')
+                    ->label('Disable Merge')
+                    ->color('warning')
+                    ->action(function (Collection $records, array $data): void {
+                        $records->each(fn ($channel) => $channel->update([
+                            'can_merge' => false,
+                        ]));
+                    })->after(function () {
+                        Notification::make()
+                            ->success()
+                            ->title('Merge disabled for selected channels')
+                            ->body('The merge has been disabled for the selected channels. They will not be merged during "Merge Same ID" jobs.')
+                            ->send();
+                    })
+                    ->hidden(fn () => ! $addToCustom)
+                    ->deselectRecordsAfterCompletion()
+                    ->requiresConfirmation()
+                    ->icon('heroicon-o-arrows-pointing-in')
+                    ->modalIcon('heroicon-o-arrows-pointing-in')
+                    ->modalDescription('Don\'t allow merging for selected channels when running "Merge Same ID" jobs.')
+                    ->modalSubmitActionLabel('Disable now'),
                 BulkAction::make('enable')
                     ->label('Enable selected')
                     ->action(function (Collection $records): void {
@@ -1021,8 +1243,8 @@ class VodResource extends Resource
     {
         return [
             'index' => ListVod::route('/'),
+            'view' => ViewVod::route('/{record}'),
             // 'create' => Pages\CreateVod::route('/create'),
-            // 'view' => Pages\ViewVod::route('/{record}'),
             // 'edit' => Pages\EditVod::route('/{record}/edit'),
         ];
     }
@@ -1063,8 +1285,11 @@ class VodResource extends Resource
         return [
             // Customizable channel fields
             Toggle::make('enabled')
+                ->columnSpanFull()
+                ->default(true),
+            Toggle::make('can_merge')
                 ->default(true)
-                ->columnSpan('full'),
+                ->helperText('Allow this channel to be merged during "Merge Same ID" jobs.'),
             Fieldset::make('Playlist Type (choose one)')
                 ->schema([
                     Toggle::make('is_custom')
@@ -1073,7 +1298,7 @@ class VodResource extends Resource
                         ->columnSpan('full'),
                     Select::make('playlist_id')
                         ->label('Playlist')
-                        ->options(fn() => Playlist::where(['user_id' => auth()->id()])->get(['name', 'id'])->pluck('name', 'id'))
+                        ->options(fn () => Playlist::where(['user_id' => auth()->id()])->get(['name', 'id'])->pluck('name', 'id'))
                         ->searchable()
                         ->live()
                         ->afterStateUpdated(function (Set $set, $state) {
@@ -1091,7 +1316,7 @@ class VodResource extends Resource
                         ->rules(['exists:playlists,id']),
                     Select::make('custom_playlist_id')
                         ->label('Custom Playlist')
-                        ->options(fn() => CustomPlaylist::where(['user_id' => auth()->id()])->get(['name', 'id'])->pluck('name', 'id'))
+                        ->options(fn () => CustomPlaylist::where(['user_id' => auth()->id()])->get(['name', 'id'])->pluck('name', 'id'))
                         ->searchable()
                         ->disabled($customPlaylist !== null)
                         ->default($customPlaylist ? $customPlaylist->id : null)
@@ -1120,7 +1345,7 @@ class VodResource extends Resource
                         ->rules(['min:1', 'max:255']),
                     TextInput::make('title_custom')
                         ->label('Title')
-                        ->placeholder(fn(Get $get) => $get('title'))
+                        ->placeholder(fn (Get $get) => $get('title'))
                         ->helperText('Leave empty to use default value.')
                         ->columnSpan(1)
                         ->rules(['min:1', 'max:255'])
@@ -1128,16 +1353,16 @@ class VodResource extends Resource
                     TextInput::make('name_custom')
                         ->label('Name')
                         ->hint('tvg-name')
-                        ->placeholder(fn(Get $get) => $get('name'))
-                        ->helperText(fn(Get $get) => $get('is_custom') ? '' : 'Leave empty to use default value.')
+                        ->placeholder(fn (Get $get) => $get('name'))
+                        ->helperText(fn (Get $get) => $get('is_custom') ? '' : 'Leave empty to use default value.')
                         ->columnSpan(1)
                         ->rules(['min:1', 'max:255']),
                     TextInput::make('stream_id_custom')
                         ->label('ID')
                         ->hint('tvg-id')
                         ->columnSpan(1)
-                        ->placeholder(fn(Get $get) => $get('stream_id'))
-                        ->helperText(fn(Get $get) => $get('is_custom') ? '' : 'Leave empty to use default value.')
+                        ->placeholder(fn (Get $get) => $get('stream_id'))
+                        ->helperText(fn (Get $get) => $get('is_custom') ? '' : 'Leave empty to use default value.')
                         ->rules(['min:1', 'max:255']),
                     TextInput::make('station_id')
                         ->label('Station ID')
@@ -1173,7 +1398,7 @@ class VodResource extends Resource
                             Select::make('group_id')
                                 ->label('Group')
                                 ->hint('group-title')
-                                ->options(fn(Get $get) => Group::where('playlist_id', $get('playlist_id'))->get(['name', 'id'])->pluck('name', 'id'))
+                                ->options(fn (Get $get) => Group::where('playlist_id', $get('playlist_id'))->get(['name', 'id'])->pluck('name', 'id'))
                                 ->columnSpanFull()
                                 ->placeholder('Select a group')
                                 ->searchable()
@@ -1183,28 +1408,28 @@ class VodResource extends Resource
                                     $set('group', $group->name ?? null);
                                 })
                                 ->rules(['numeric', 'min:0']),
-                        ])->hidden(fn(Get $get) => ! $get('playlist_id')),
+                        ])->hidden(fn (Get $get) => ! $get('playlist_id')),
                     TextInput::make('group')
                         ->columnSpanFull()
                         ->placeholder('Enter a group title')
                         ->hint('group-title')
                         ->hidden(! $edit)
                         ->rules(['min:1', 'max:255'])
-                        ->hidden(fn(Get $get) => ! $get('custom_playlist_id')),
+                        ->hidden(fn (Get $get) => ! $get('custom_playlist_id')),
                 ]),
             Fieldset::make('URL Settings')
                 ->schema([
                     TextInput::make('url')
-                        ->label(fn(Get $get) => $get('is_custom') ? 'URL' : 'Provider URL')
+                        ->label(fn (Get $get) => $get('is_custom') ? 'URL' : 'Provider URL')
                         ->columnSpan(1)
                         ->prefixIcon('heroicon-m-globe-alt')
                         ->hintIcon(
-                            icon: fn(Get $get) => $get('is_custom') ? null : 'heroicon-m-question-mark-circle',
-                            tooltip: fn(Get $get) => $get('is_custom') ? null : 'The original URL from the playlist provider. This is read-only and cannot be modified. This URL is automatically updated on Playlist sync.'
+                            icon: fn (Get $get) => $get('is_custom') ? null : 'heroicon-m-question-mark-circle',
+                            tooltip: fn (Get $get) => $get('is_custom') ? null : 'The original URL from the playlist provider. This is read-only and cannot be modified. This URL is automatically updated on Playlist sync.'
                         )
-                        ->formatStateUsing(fn($record) => $record?->url)
-                        ->disabled(fn(Get $get) => ! $get('is_custom')) // make it read-only but copyable for non-custom channels
-                        ->dehydrated(fn(Get $get) => $get('is_custom')) // don't save the value in the database for custom channels
+                        ->formatStateUsing(fn ($record) => $record?->url)
+                        ->disabled(fn (Get $get) => ! $get('is_custom')) // make it read-only but copyable for non-custom channels
+                        ->dehydrated(fn (Get $get) => $get('is_custom')) // don't save the value in the database for custom channels
                         ->type('url'),
                     TextInput::make('url_custom')
                         ->label('URL Override')
@@ -1217,19 +1442,19 @@ class VodResource extends Resource
                         ->helperText('Leave empty to use provider URL.')
                         ->rules(['min:1'])
                         ->type('url')
-                        ->hidden(fn(Get $get) => $get('is_custom')),
+                        ->hidden(fn (Get $get) => $get('is_custom')),
                     TextInput::make('logo_internal')
-                        ->label(fn(Get $get) => $get('is_custom') ? 'Logo' : 'Provider Logo')
+                        ->label(fn (Get $get) => $get('is_custom') ? 'Logo' : 'Provider Logo')
                         ->columnSpan(1)
                         ->prefixIcon('heroicon-m-globe-alt')
                         ->hint('tvg-logo')
                         ->hintIcon(
-                            icon: fn(Get $get) => $get('is_custom') ? null : 'heroicon-m-question-mark-circle',
-                            tooltip: fn(Get $get) => $get('is_custom') ? null : 'The original logo from the playlist provider. This is read-only and cannot be modified. This URL is automatically updated on Playlist sync.'
+                            icon: fn (Get $get) => $get('is_custom') ? null : 'heroicon-m-question-mark-circle',
+                            tooltip: fn (Get $get) => $get('is_custom') ? null : 'The original logo from the playlist provider. This is read-only and cannot be modified. This URL is automatically updated on Playlist sync.'
                         )
-                        ->formatStateUsing(fn($record) => $record?->logo_internal)
-                        ->disabled(fn(Get $get) => ! $get('is_custom')) // make it read-only but copyable for non-custom channels
-                        ->dehydrated(fn(Get $get) => $get('is_custom')) // don't save the value in the database for custom channels
+                        ->formatStateUsing(fn ($record) => $record?->logo_internal)
+                        ->disabled(fn (Get $get) => ! $get('is_custom')) // make it read-only but copyable for non-custom channels
+                        ->dehydrated(fn (Get $get) => $get('is_custom')) // don't save the value in the database for custom channels
                         ->type('url'),
                     TextInput::make('logo')
                         ->label('Logo Override')
@@ -1243,7 +1468,7 @@ class VodResource extends Resource
                         ->helperText('Leave empty to use provider logo.')
                         ->rules(['min:1'])
                         ->type('url')
-                        ->hidden(fn(Get $get) => $get('is_custom')),
+                        ->hidden(fn (Get $get) => $get('is_custom')),
                     TextInput::make('url_proxy')
                         ->label('Proxy URL')
                         ->columnSpan(2)
@@ -1276,7 +1501,7 @@ class VodResource extends Resource
                         ->label('EPG Channel')
                         ->helperText('Select an associated EPG channel for this channel.')
                         ->relationship('epgChannel', 'name')
-                        ->getOptionLabelFromRecordUsing(fn($record) => "$record->name [{$record->epg->name}]")
+                        ->getOptionLabelFromRecordUsing(fn ($record) => "$record->name [{$record->epg->name}]")
                         ->getSearchResultsUsing(function (string $search) {
                             $searchLower = strtolower($search);
                             $channels = auth()->user()->epgChannels()
@@ -1521,7 +1746,7 @@ class VodResource extends Resource
                                 return ! empty(trim($url));
                             });
 
-                            return array_map(fn($url) => ['url' => $url], array_values($filtered));
+                            return array_map(fn ($url) => ['url' => $url], array_values($filtered));
                         })
                         ->dehydrateStateUsing(function ($state) {
                             if (! is_array($state)) {
@@ -1561,7 +1786,7 @@ class VodResource extends Resource
                                 return ! empty(trim($language));
                             });
 
-                            return array_map(fn($language) => ['language' => $language], array_values($filtered));
+                            return array_map(fn ($language) => ['language' => $language], array_values($filtered));
                         })
                         ->dehydrateStateUsing(function ($state) {
                             if (! is_array($state)) {
@@ -1578,187 +1803,41 @@ class VodResource extends Resource
 
                 ]),
 
-            Fieldset::make('Stream location file settings')
+            Fieldset::make('Stream file settings')
                 ->schema([
                     Grid::make(1)
                         ->schema([
-                            Toggle::make('sync_settings.override_global')
-                                ->label('Override Global Settings')
-                                ->hintAction(
-                                    Action::make('Global Sync Settings')
-                                        ->icon('heroicon-o-arrow-top-right-on-square')
-                                        ->url('/preferences?tab=sync-options%3A%3Adata%3A%3Atab')
-                                        ->openUrlInNewTab()
+                            Select::make('stream_file_setting_id')
+                                ->label('Stream File Setting Profile')
+                                ->searchable()
+                                ->relationship('streamFileSetting', 'name', fn ($query) => $query->forVod()->where('user_id', auth()->id())
                                 )
-                                ->helperText('Enable to customize sync settings for this VOD channel (read-only when disabled, global settings from Preferences will be used)')
-                                ->live(),
-                            Toggle::make('sync_settings.enabled')
-                                ->live()
-                                ->disabled(fn($get) => ! $get('sync_settings.override_global'))
-                                ->label('Enable .strm file generation'),
+                                ->nullable()
+                                ->hintAction(
+                                    Action::make('manage_stream_file_settings')
+                                        ->label('Manage Stream File Settings')
+                                        ->icon('heroicon-o-arrow-top-right-on-square')
+                                        ->iconPosition('after')
+                                        ->size('sm')
+                                        ->url('/stream-file-settings')
+                                        ->openUrlInNewTab(false)
+                                )
+                                ->hintAction(
+                                    Action::make('global_settings')
+                                        ->label('Global Settings')
+                                        ->icon('heroicon-o-cog-6-tooth')
+                                        ->iconPosition('after')
+                                        ->size('sm')
+                                        ->url('/preferences?tab=sync-options%3A%3Adata%3A%3Atab')
+                                        ->openUrlInNewTab(false)
+                                )
+                                ->helperText('Select a Stream File Setting profile to override global/group settings for this VOD channel. Leave empty to use group or global settings. Priority: VOD > Group > Global.'),
                             TextInput::make('sync_location')
-                                ->label('Location')
-                                ->live()
-                                ->disabled(fn($get) => ! $get('sync_settings.override_global'))
+                                ->label('Location Override')
                                 ->rules([new CheckIfUrlOrLocalPath(localOnly: true, isDirectory: true)])
-                                ->helperText(function ($record, $get) {
-                                    $path = $get('sync_location') ?? '';
-                                    $pathStructure = $get('sync_settings.path_structure') ?? [];
-                                    $filenameMetadata = $get('sync_settings.filename_metadata') ?? [];
-                                    $tmdbIdFormat = $get('sync_settings.tmdb_id_format') ?? 'square';
-
-                                    // Use actual record data or fallback to example
-                                    $groupName = $record?->group ?? 'Action';
-                                    $title = $record?->title_custom ?? $record?->title ?? $record?->name ?? 'John Wick: Chapter 4 (2023)';
-                                    $year = $record?->year ?? $record?->info['year'] ?? '2023';
-                                    $tmdbId = $record?->info['tmdb_id'] ?? $record?->movie_data['tmdb_id'] ?? 603692;
-
-                                    // Build path preview
-                                    $preview = 'Preview: ' . $path;
-
-                                    if (in_array('group', $pathStructure)) {
-                                        $preview .= '/' . $groupName;
-                                    }
-                                    if (in_array('title', $pathStructure)) {
-                                        $preview .= '/' . PlaylistService::makeFilesystemSafe($title, $get('vod_stream_file_sync_replace_char') ?? ' ');
-                                    }
-
-                                    // Build filename preview
-                                    $filename = $title;
-
-                                    // Add year to filename if selected and available
-                                    if (in_array('year', $filenameMetadata) && ! empty($year)) {
-                                        // Only add year if it's not already in the title
-                                        if (strpos($filename, "({$year})") === false) {
-                                            $filename .= " ({$year})";
-                                        }
-                                    }
-
-                                    // Add metadata to filename
-                                    if (in_array('tmdb_id', $filenameMetadata) && ! empty($tmdbId)) {
-                                        $bracket = $tmdbIdFormat === 'curly' ? ['{', '}'] : ['[', ']'];
-                                        $filename .= " {$bracket[0]}tmdb-{$tmdbId}{$bracket[1]}";
-                                    }
-
-                                    $preview .= '/' . PlaylistService::makeFilesystemSafe($filename) . '.strm';
-
-                                    return $preview;
-                                })
+                                ->helperText('Override the sync location from the profile. Leave empty to use profile location.')
                                 ->maxLength(255)
-                                ->required()
-                                ->hidden(fn($get) => ! $get('sync_settings.enabled'))
                                 ->placeholder('/VOD/movies'),
-                            Forms\Components\ToggleButtons::make('sync_settings.path_structure')
-                                ->label('Path structure (folders)')
-                                ->live()
-                                ->disabled(fn($get) => ! $get('sync_settings.override_global'))
-                                ->multiple()
-                                ->grouped()
-                                ->options([
-                                    'group' => 'Group',
-                                    'title' => 'Title',
-                                ])
-                                ->afterStateHydrated(function ($component, $state, $get) {
-                                    // Convert old boolean field to array format
-                                    if (is_null($state) || empty($state)) {
-                                        $structure = [];
-                                        if ($get('sync_settings.include_season')) {
-                                            $structure[] = 'group';
-                                        }
-                                        $component->state($structure);
-                                    }
-                                })
-                                ->dehydrateStateUsing(function ($state, Set $set) {
-                                    // Update the old boolean field for backwards compatibility
-                                    $state = $state ?? [];
-                                    $set('sync_settings.include_season', in_array('group', $state));
-
-                                    return $state;
-                                })->hidden(fn($get) => ! $get('sync_settings.enabled')),
-                            Fieldset::make('Include Metadata')
-                                ->schema([
-                                    Forms\Components\ToggleButtons::make('sync_settings.filename_metadata')
-                                        ->label('Filename metadata')
-                                        ->live()
-                                        ->inline()
-                                        ->disabled(fn($get) => ! $get('sync_settings.override_global'))
-                                        ->multiple()
-                                        ->columnSpanFull()
-                                        ->options([
-                                            'year' => 'Year',
-                                            // 'resolution' => 'Resolution',
-                                            // 'codec' => 'Codec',
-                                            'tmdb_id' => 'TMDB ID',
-                                        ])
-                                        ->afterStateHydrated(function ($component, $state, $get) {
-                                            // Convert old boolean fields to array format
-                                            if (is_null($state) || empty($state)) {
-                                                $metadata = [];
-                                                if ($get('sync_settings.filename_year')) {
-                                                    $metadata[] = 'year';
-                                                }
-                                                if ($get('sync_settings.filename_resolution')) {
-                                                    $metadata[] = 'resolution';
-                                                }
-                                                if ($get('sync_settings.filename_codec')) {
-                                                    $metadata[] = 'codec';
-                                                }
-                                                if ($get('sync_settings.filename_tmdb_id')) {
-                                                    $metadata[] = 'tmdb_id';
-                                                }
-                                                $component->state($metadata);
-                                            }
-                                        })
-                                        ->dehydrateStateUsing(function ($state, Set $set) {
-                                            // Update the old boolean fields for backwards compatibility
-                                            $state = $state ?? [];
-                                            $set('sync_settings.filename_year', in_array('year', $state));
-                                            $set('sync_settings.filename_resolution', in_array('resolution', $state));
-                                            $set('sync_settings.filename_codec', in_array('codec', $state));
-                                            $set('sync_settings.filename_tmdb_id', in_array('tmdb_id', $state));
-
-                                            return $state;
-                                        }),
-                                    Forms\Components\ToggleButtons::make('sync_settings.tmdb_id_format')
-                                        ->label('TMDB ID format')
-                                        ->disabled(fn($get) => ! $get('sync_settings.override_global'))
-                                        ->inline()
-                                        ->live()
-                                        ->grouped()
-                                        ->options([
-                                            'square' => '[square]',
-                                            'curly' => '{curly}',
-                                        ])->hidden(fn($get) => ! in_array('tmdb_id', $get('sync_settings.filename_metadata') ?? [])),
-                                ])
-                                ->hidden(fn($get) => ! $get('sync_settings.enabled')),
-                            Fieldset::make('Filename Cleansing')
-                                ->schema([
-                                    Toggle::make('sync_settings.clean_special_chars')
-                                        ->label('Clean special characters')
-                                        ->disabled(fn($get) => ! $get('sync_settings.override_global'))
-                                        ->helperText('Remove or replace special characters in filenames')
-                                        ->inline(false),
-                                    Toggle::make('sync_settings.remove_consecutive_chars')
-                                        ->label('Remove consecutive replacement characters')
-                                        ->disabled(fn($get) => ! $get('sync_settings.override_global'))
-                                        ->inline(false)
-                                        ->live(),
-                                    Forms\Components\ToggleButtons::make('sync_settings.replace_char')
-                                        ->label('Replace with')
-                                        ->disabled(fn($get) => ! $get('sync_settings.override_global'))
-                                        ->inline()
-                                        ->live()
-                                        ->grouped()
-                                        ->columnSpanFull()
-                                        ->options([
-                                            'space' => 'Space',
-                                            'dash' => '-',
-                                            'underscore' => '_',
-                                            'period' => '.',
-                                            'remove' => 'Remove',
-                                        ]),
-                                ])
-                                ->hidden(fn($get) => ! $get('sync_settings.enabled')),
                         ]),
                 ]),
 
@@ -1792,7 +1871,7 @@ class VodResource extends Resource
                                 ->searchable()
                                 ->getSearchResultsUsing(function (string $search, $get, $livewire) {
                                     $existingFailoverIds = collect($get('../../failovers') ?? [])
-                                        ->filter(fn($failover) => $failover['channel_failover_id'] ?? null)
+                                        ->filter(fn ($failover) => $failover['channel_failover_id'] ?? null)
                                         ->pluck('channel_failover_id')
                                         ->toArray();
 

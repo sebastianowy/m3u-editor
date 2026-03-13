@@ -3,7 +3,7 @@
 namespace App\Models;
 
 use App\Enums\PlaylistChannelId;
-use App\Services\XtreamService;
+use App\Jobs\UpdateXtreamStats;
 use App\Traits\ShortUrlTrait;
 use Illuminate\Database\Eloquent\Casts\Attribute;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
@@ -12,7 +12,6 @@ use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\BelongsToMany;
 use Illuminate\Database\Eloquent\Relations\HasManyThrough;
 use Illuminate\Support\Facades\Cache;
-use Illuminate\Support\Facades\Log;
 
 class PlaylistAlias extends Model
 {
@@ -25,8 +24,10 @@ class PlaylistAlias extends Model
         'enabled' => 'boolean',
         'enable_proxy' => 'boolean',
         'priority' => 'integer',
+        'expires_at' => 'datetime',
         'custom_headers' => 'array',
         'strict_live_ts' => 'boolean',
+        'use_sticky_session' => 'boolean',
     ];
 
     /**
@@ -47,10 +48,11 @@ class PlaylistAlias extends Model
                 if (is_array($raw)) {
                     $configs = [];
                     foreach ($raw as $index => $item) {
-                        if (is_array($item) && !empty($item['url'])) {
+                        if (is_array($item) && ! empty($item['url'])) {
                             $configs[] = $item;
                         }
                     }
+
                     return $configs;
                 }
 
@@ -66,7 +68,7 @@ class PlaylistAlias extends Model
 
     public function findXtreamConfigByUrl(?string $url): ?array
     {
-        if (!$url) {
+        if (! $url) {
             return null;
         }
 
@@ -113,17 +115,29 @@ class PlaylistAlias extends Model
     }
 
     /**
+     * Determine whether this alias auth credential is expired.
+     */
+    public function isExpired(): bool
+    {
+        if ($this->expires_at === null) {
+            return false;
+        }
+
+        return now()->greaterThanOrEqualTo($this->expires_at);
+    }
+
+    /**
      * Get the effective playlist (either the main playlist or custom playlist)
      * This method returns the playlist that should be used for configuration
      */
     public function getEffectivePlaylist()
     {
         // Load relationships if not already loaded
-        if (!$this->relationLoaded('playlist') && $this->playlist_id) {
+        if (! $this->relationLoaded('playlist') && $this->playlist_id) {
             $this->load('playlist');
         }
 
-        if (!$this->relationLoaded('customPlaylist') && $this->custom_playlist_id) {
+        if (! $this->relationLoaded('customPlaylist') && $this->custom_playlist_id) {
             $this->load('customPlaylist');
         }
 
@@ -135,7 +149,7 @@ class PlaylistAlias extends Model
      */
     public function getXtreamAttribute(): bool
     {
-        return !empty($this->xtream_config);
+        return ! empty($this->xtream_config);
     }
 
     /**
@@ -144,16 +158,21 @@ class PlaylistAlias extends Model
     public function getAutoChannelIncrementAttribute(): bool
     {
         $effectivePlaylist = $this->getEffectivePlaylist();
+
         return $effectivePlaylist ? $effectivePlaylist->auto_channel_increment : false;
     }
+
     public function getDummyEpgLengthAttribute(): int
     {
         $effectivePlaylist = $this->getEffectivePlaylist();
-        return $effectivePlaylist ? (int)($effectivePlaylist->dummy_epg_length ?? 120) : 120;
+
+        return $effectivePlaylist ? (int) ($effectivePlaylist->dummy_epg_length ?? 120) : 120;
     }
+
     public function getIdChannelByAttribute(): PlaylistChannelId
     {
         $effectivePlaylist = $this->getEffectivePlaylist();
+
         return $effectivePlaylist ? $effectivePlaylist->id_channel_by : PlaylistChannelId::ChannelId;
     }
 
@@ -163,17 +182,20 @@ class PlaylistAlias extends Model
     public function groups()
     {
         $effectivePlaylist = $this->getEffectivePlaylist();
-        if (!$effectivePlaylist) {
+        if (! $effectivePlaylist) {
             return collect();
         }
+
         return $effectivePlaylist->groups();
     }
+
     public function groupTags()
     {
         $effectivePlaylist = $this->getEffectivePlaylist();
-        if (!$effectivePlaylist) {
+        if (! $effectivePlaylist) {
             return collect();
         }
+
         return $effectivePlaylist->groupTags();
     }
 
@@ -183,25 +205,30 @@ class PlaylistAlias extends Model
     public function categories()
     {
         $effectivePlaylist = $this->getEffectivePlaylist();
-        if (!$effectivePlaylist) {
+        if (! $effectivePlaylist) {
             return collect();
         }
+
         return $effectivePlaylist->categories();
     }
+
     public function categoryTags()
     {
         $effectivePlaylist = $this->getEffectivePlaylist();
-        if (!$effectivePlaylist) {
+        if (! $effectivePlaylist) {
             return collect();
         }
+
         return $effectivePlaylist->categoryTags();
     }
 
     public function channels(): BelongsToMany|HasManyThrough
     {
         if ($this->custom_playlist_id) {
-            return $this->belongsToMany(Channel::class, 'channel_custom_playlist', 'custom_playlist_id', 'channel_id', 'custom_playlist_id', 'id');
+            return $this->belongsToMany(Channel::class, 'channel_custom_playlist', 'custom_playlist_id', 'channel_id', 'custom_playlist_id', 'id')
+                ->withPivot(['channel_number']);
         }
+
         return $this->hasManyThrough(
             Channel::class,
             Playlist::class,
@@ -217,6 +244,7 @@ class PlaylistAlias extends Model
         if ($this->custom_playlist_id) {
             return $this->belongsToMany(Series::class, 'series_custom_playlist', 'custom_playlist_id', 'series_id', 'custom_playlist_id', 'id');
         }
+
         return $this->hasManyThrough(
             Series::class,
             Playlist::class,
@@ -263,24 +291,40 @@ class PlaylistAlias extends Model
             ->where('enabled', true);
     }
 
+    public function enableProxy(): Attribute
+    {
+        return Attribute::make(
+            get: function ($value) {
+                if ($value) {
+                    // Check playlist user has access to proxy features
+                    if (! $this->user?->canUseProxy()) {
+                        return false;
+                    }
+                }
+
+                return $value;
+            }
+        );
+    }
+
     public function liveCount(): Attribute
     {
         return Attribute::make(
-            get: fn() => $this->live_channels()->count()
+            get: fn () => $this->live_channels()->count()
         );
     }
 
     public function vodCount(): Attribute
     {
         return Attribute::make(
-            get: fn() => $this->vod_channels()->count()
+            get: fn () => $this->vod_channels()->count()
         );
     }
 
     public function seriesCount(): Attribute
     {
         return Attribute::make(
-            get: fn() => $this->series()->count()
+            get: fn () => $this->series()->count()
         );
     }
 
@@ -302,7 +346,7 @@ class PlaylistAlias extends Model
     {
         // If explicit alias-level credentials exist, always prefer them.
         if ($this->username && $this->password) {
-            return (object)[
+            return (object) [
                 'username' => $this->username,
                 'password' => $this->password,
             ];
@@ -318,33 +362,21 @@ class PlaylistAlias extends Model
     {
         return Attribute::make(
             get: function ($value, $attributes) {
-                $key = "playlist_alias:{$attributes['id']}:xtream_status";
-
-                $primaryConfig = $this->getPrimaryXtreamConfig();
-                if (!$primaryConfig) {
-                    return [];
+                $key = "a:{$attributes['id']}:xtream_status";
+                $cached = Cache::get($key);
+                if ($cached !== null) {
+                    return $cached;
                 }
 
-                try {
-                    $xtream = XtreamService::make(xtream_config: $primaryConfig);
-                    if ($xtream) {
-                        return Cache::remember(
-                            $key,
-                            5, // cache for 5 seconds
-                            function () use ($xtream) {
-                                $userInfo = $xtream->userInfo(timeout: 3);
-                                return $userInfo ?: [];
-                            }
-                        );
-                    }
-                } catch (\Exception $e) {
-                    Log::error(
-                        'Failed to fetch metadata for Xtream playlist alias ' . $this->id,
-                        ['exception' => $e]
-                    );
-                }
+                // Dispatch job to update in background if not cached/cache expired
+                UpdateXtreamStats::dispatch($this);
 
-                return [];
+                // Return stored value from database
+                $results = is_string($value)
+                    ? json_decode($value, true)
+                    : ($value ?? []);
+
+                return $results;
             }
         );
     }
@@ -359,20 +391,20 @@ class PlaylistAlias extends Model
 
         // We need at least one alias xtream config to do any transformation.
         $primaryAliasConfig = $this->getPrimaryXtreamConfig();
-        if (!$primaryAliasConfig) {
+        if (! $primaryAliasConfig) {
             return $originalUrl;
         }
 
         // Get the channel's effective playlist to find its source config.
         $effectivePlaylist = $channel->getEffectivePlaylist();
-        if (!$effectivePlaylist || !$effectivePlaylist->xtream_config) {
+        if (! $effectivePlaylist || ! $effectivePlaylist->xtream_config) {
             return $originalUrl;
         }
 
         $sourceConfig = $effectivePlaylist->xtream_config;
 
         // If this alias has multiple configs, choose the best match by base URL.
-        $aliasConfig = $this->findXtreamConfigByUrl((string)($sourceConfig['url'] ?? '')) ?? $primaryAliasConfig;
+        $aliasConfig = $this->findXtreamConfigByUrl((string) ($sourceConfig['url'] ?? '')) ?? $primaryAliasConfig;
 
         return $this->transformUrl($originalUrl, $sourceConfig, $aliasConfig);
     }
@@ -386,20 +418,20 @@ class PlaylistAlias extends Model
 
         // We need at least one alias xtream config to do any transformation.
         $primaryAliasConfig = $this->getPrimaryXtreamConfig();
-        if (!$primaryAliasConfig) {
+        if (! $primaryAliasConfig) {
             return $originalUrl;
         }
 
         // Get the episode's effective playlist to find its source config.
         $effectivePlaylist = $episode->getEffectivePlaylist();
-        if (!$effectivePlaylist || !$effectivePlaylist->xtream_config) {
+        if (! $effectivePlaylist || ! $effectivePlaylist->xtream_config) {
             return $originalUrl;
         }
 
         $sourceConfig = $effectivePlaylist->xtream_config;
 
         // If this alias has multiple configs, choose the best match by base URL.
-        $aliasConfig = $this->findXtreamConfigByUrl((string)($sourceConfig['url'] ?? '')) ?? $primaryAliasConfig;
+        $aliasConfig = $this->findXtreamConfigByUrl((string) ($sourceConfig['url'] ?? '')) ?? $primaryAliasConfig;
 
         return $this->transformUrl($originalUrl, $sourceConfig, $aliasConfig);
     }
@@ -437,9 +469,9 @@ class PlaylistAlias extends Model
         // Pattern matches:
         // http://domain:port/(live|series|movie)/username/password/<stream>
         $pattern =
-            '#^' . preg_quote($sourceBaseUrl, '#') .
-            '/(live|series|movie)/' . preg_quote($sourceUsername, '#') .
-            '/' . preg_quote($sourcePassword, '#') .
+            '#^'.preg_quote($sourceBaseUrl, '#').
+            '/(live|series|movie)/'.preg_quote($sourceUsername, '#').
+            '/'.preg_quote($sourcePassword, '#').
             '/(.+)$#';
 
         if (preg_match($pattern, $originalUrl, $matches)) {

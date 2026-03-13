@@ -15,8 +15,8 @@ class LogoService
      */
     public static function getChannelLogoUrl($channel): string
     {
-        if (!$channel) {
-            return url('/placeholder.png');
+        if (! $channel) {
+            return LogoCacheService::getPlaceholderUrl('logo');
         }
 
         $logoUrl = '';
@@ -45,11 +45,15 @@ class LogoService
 
         // If still empty, return placeholder
         if (empty($logoUrl)) {
-            return url('/placeholder.png');
+            if ($channel->is_vod) {
+                return LogoCacheService::getPlaceholderUrl('poster');
+            } else {
+                return LogoCacheService::getPlaceholderUrl('logo');
+            }
         }
 
         // If it's already a local URL, return as-is
-        if (!filter_var($logoUrl, FILTER_VALIDATE_URL) || str_starts_with($logoUrl, url('/'))) {
+        if (! filter_var($logoUrl, FILTER_VALIDATE_URL) || str_starts_with($logoUrl, url('/'))) {
             return $logoUrl;
         }
 
@@ -67,14 +71,14 @@ class LogoService
      */
     public static function getSeriesLogoUrl($series): string
     {
-        if (!$series || empty($series->cover)) {
-            return url('/placeholder.png');
+        if (! $series || empty($series->cover)) {
+            return LogoCacheService::getPlaceholderUrl('poster');
         }
 
         $logoUrl = $series->cover;
 
         // If it's already a local URL, return as-is
-        if (!filter_var($logoUrl, FILTER_VALIDATE_URL) || str_starts_with($logoUrl, url('/'))) {
+        if (! filter_var($logoUrl, FILTER_VALIDATE_URL) || str_starts_with($logoUrl, url('/'))) {
             return $logoUrl;
         }
 
@@ -89,14 +93,14 @@ class LogoService
      */
     public static function getEpisodeLogoUrl($episode): string
     {
-        if (!$episode || empty($episode->info)) {
-            return url('/episode-placeholder.png');
+        if (! $episode || empty($episode->info)) {
+            return LogoCacheService::getPlaceholderUrl('episode');
         }
 
         $logoUrl = $episode->info['movie_image'] ?? $episode->info['cover_big'] ?? '';
 
         // If it's already a local URL, return as-is
-        if (!filter_var($logoUrl, FILTER_VALIDATE_URL) || str_starts_with($logoUrl, url('/'))) {
+        if (! filter_var($logoUrl, FILTER_VALIDATE_URL) || str_starts_with($logoUrl, url('/'))) {
             return $logoUrl;
         }
 
@@ -111,14 +115,14 @@ class LogoService
      */
     public static function getEpgChannelLogoUrl($epgChannel): string
     {
-        if (!$epgChannel || empty($epgChannel->icon)) {
-            return url('/placeholder.png');
+        if (! $epgChannel || empty($epgChannel->icon)) {
+            return LogoCacheService::getPlaceholderUrl('logo');
         }
 
         $logoUrl = $epgChannel->icon;
 
         // If it's already a local URL, return as-is
-        if (!filter_var($logoUrl, FILTER_VALIDATE_URL) || str_starts_with($logoUrl, url('/'))) {
+        if (! filter_var($logoUrl, FILTER_VALIDATE_URL) || str_starts_with($logoUrl, url('/'))) {
             return $logoUrl;
         }
 

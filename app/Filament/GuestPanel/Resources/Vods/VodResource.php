@@ -2,35 +2,32 @@
 
 namespace App\Filament\GuestPanel\Resources\Vods;
 
-use App\Filament\GuestPanel\Pages\Concerns\HasPlaylist;
-use App\Models\Channel;
-use BackedEnum;
-use Filament\Actions;
-use Filament\Forms;
-use Filament\Infolists;
-use Filament\Resources\Resource;
-use Filament\Schemas\Schema;
-use Filament\Support\Icons\Heroicon;
-use Filament\Tables;
-use Filament\Tables\Table;
-use Illuminate\Support\Facades\DB;
-use Illuminate\Support\HtmlString;
-use Illuminate\Database\Eloquent\Builder;
-use Illuminate\Support\Str;
 use App\Facades\LogoFacade;
 use App\Facades\PlaylistFacade;
+use App\Filament\GuestPanel\Pages\Concerns\HasPlaylist;
+use App\Models\Channel;
 use App\Models\CustomPlaylist;
 use App\Models\Playlist;
 use Filament\Actions\Action;
 use Filament\Actions\ViewAction;
+use Filament\Resources\Resource;
+use Filament\Schemas\Schema;
+use Filament\Tables;
 use Filament\Tables\Enums\RecordActionsPosition;
+use Filament\Tables\Table;
+use Illuminate\Database\Eloquent\Builder;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\HtmlString;
+use Illuminate\Support\Str;
 
 class VodResource extends Resource
 {
     use HasPlaylist;
 
     protected static ?string $model = Channel::class;
+
     protected static ?string $navigationLabel = 'VOD';
+
     protected static ?string $slug = 'vod';
 
     public static function getNavigationBadge(): ?string
@@ -39,9 +36,10 @@ class VodResource extends Resource
         if ($playlist) {
             return (string) $playlist->channels()->where([
                 ['enabled', true],
-                ['is_vod', true]
+                ['is_vod', true],
             ])->count();
         }
+
         return '';
     }
 
@@ -56,7 +54,7 @@ class VodResource extends Resource
         $parameters['uuid'] = static::getCurrentUuid();
 
         // Default to 'index' if $name is not provided
-        $routeName = static::getRouteBaseName($panel) . '.' . ($name ?? 'index');
+        $routeName = static::getRouteBaseName($panel).'.'.($name ?? 'index');
 
         return route($routeName, $parameters, $isAbsolute);
     }
@@ -70,7 +68,7 @@ class VodResource extends Resource
                 ->where([
                     ['enabled', true], // Only show enabled channels
                     ['is_vod', true], // Only show VOD channels
-                    ['playlist_id', $playlist?->id] // Only show VOD channels from the current playlist
+                    ['playlist_id', $playlist?->id], // Only show VOD channels from the current playlist
                 ]);
         }
         if ($playlist instanceof CustomPlaylist) {
@@ -84,6 +82,7 @@ class VodResource extends Resource
                     ['is_vod', true], // Only show VOD channels
                 ]);
         }
+
         return parent::getEloquentQuery();
     }
 
@@ -111,10 +110,10 @@ class VodResource extends Resource
                     ->label('Cover')
                     ->checkFileExistence(false)
                     ->size('inherit', 'inherit')
-                    ->extraImgAttributes(fn($record): array => [
+                    ->extraImgAttributes(fn ($record): array => [
                         'style' => 'width:80px; height:120px;', // VOD channel style
                     ])
-                    ->getStateUsing(fn($record) => LogoFacade::getChannelLogoUrl($record))
+                    ->getStateUsing(fn ($record) => LogoFacade::getChannelLogoUrl($record))
                     ->toggleable(),
                 Tables\Columns\TextColumn::make('info')
                     ->label('Info')
@@ -124,9 +123,12 @@ class VodResource extends Resource
                         $title = $record->title_custom ?: $record->title;
                         $html = "<span class='fi-ta-text-item-label whitespace-normal text-sm leading-6 text-gray-950 dark:text-white'>{$title}</span>";
                         if (is_array($info)) {
-                            $description = $info['description'] ?? $info['plot'] ?? '';
-                            $html .= "<p class='text-sm text-gray-500 dark:text-gray-400 whitespace-normal mt-2'>{$description}</p>";
+                            $description = Str::limit($info['description'] ?? $info['plot'] ?? '', 200);
+                            if (! empty($description)) {
+                                $html .= "<p class='text-sm text-gray-500 dark:text-gray-400 whitespace-normal mt-2'>{$description}</p>";
+                            }
                         }
+
                         return new HtmlString($html);
                     })
                     ->extraAttributes(['style' => 'min-width: 350px;'])
@@ -137,9 +139,10 @@ class VodResource extends Resource
                         if ($record->has_metadata) {
                             return 'heroicon-o-check-circle';
                         }
+
                         return 'heroicon-o-minus';
                     })
-                    ->color(fn($record): string => $record->has_metadata ? 'success' : 'gray'),
+                    ->color(fn ($record): string => $record->has_metadata ? 'success' : 'gray'),
                 Tables\Columns\TextColumn::make('group')
                     ->label('Category')
                     ->toggleable()
@@ -183,13 +186,15 @@ class VodResource extends Resource
                     ->label('Default Name')
                     ->sortable()
                     ->searchable(query: function (Builder $query, string $search): Builder {
-                        return $query->orWhereRaw('LOWER(channels.name) LIKE ?', ['%' . strtolower($search) . '%']);
+                        return $query->orWhereRaw('LOWER(channels.name) LIKE ?', ['%'.strtolower($search).'%']);
                     })
                     ->toggleable(isToggledHiddenByDefault: true),
                 Tables\Columns\TextColumn::make('url')
                     ->label('Default URL')
                     ->sortable()
-                    ->searchable()
+                    ->searchable(query: function (Builder $query, string $search): Builder {
+                        return $query->orWhereRaw('LOWER(channels.url::text) LIKE ?', ['%'.strtolower($search).'%']);
+                    })
                     ->toggleable(isToggledHiddenByDefault: true),
 
                 Tables\Columns\TextColumn::make('created_at')
@@ -214,11 +219,10 @@ class VodResource extends Resource
                     ->button()
                     ->hiddenLabel()
                     ->size('sm'),
-                // ViewAction::make()
-                //     ->button()
-                //     ->icon('heroicon-s-information-circle')
-                //     ->hiddenLabel()
-                //     ->slideOver(),
+                ViewAction::make()
+                    ->button()
+                    ->icon('heroicon-s-eye')
+                    ->hiddenLabel(),
             ], position: RecordActionsPosition::BeforeCells)
             ->toolbarActions([
                 //
@@ -236,7 +240,7 @@ class VodResource extends Resource
     {
         return [
             'index' => Pages\ListVod::route('/'),
-            // 'view' => Pages\ViewVod::route('/{record}'),
+            'view' => Pages\ViewVod::route('/{record}'),
         ];
     }
 }

@@ -2,43 +2,36 @@
 
 namespace App\Filament\Resources\Groups;
 
-use Filament\Schemas\Schema;
-use Filament\Tables\Columns\TextInputColumn;
-use Filament\Tables\Columns\TextColumn;
-use Filament\Tables\Columns\IconColumn;
-use Filament\Tables\Filters\SelectFilter;
-use Filament\Actions\ActionGroup;
-use Filament\Actions\ViewAction;
-use Filament\Actions\Action;
-use Filament\Forms\Components\Select;
-use Filament\Schemas\Components\Utilities\Set;
-use Filament\Schemas\Components\Utilities\Get;
-use Filament\Actions\DeleteAction;
-use Filament\Tables\Enums\RecordActionsPosition;
-use Filament\Actions\BulkActionGroup;
-use Filament\Actions\BulkAction;
-use App\Filament\Resources\Groups\RelationManagers\ChannelsRelationManager;
-use App\Filament\Resources\Groups\RelationManagers\VodRelationManager;
+use App\Facades\SortFacade;
+use App\Filament\Resources\Groups\Pages\EditGroup;
 use App\Filament\Resources\Groups\Pages\ListGroups;
-use App\Filament\Resources\Groups\Pages\ViewGroup;
-use Filament\Schemas\Components\Section;
-use Filament\Infolists\Components\TextEntry;
-use Filament\Forms\Components\TextInput;
-use App\Filament\Resources\Playlists\PlaylistResource;
-use App\Models\CustomPlaylist;
+use App\Filament\Resources\Groups\RelationManagers\ChannelsRelationManager;
 use App\Models\Group;
-use App\Models\Playlist;
-use Filament\Forms;
-use Filament\Infolists;
+use App\Services\PlaylistService;
+use App\Traits\HasUserFiltering;
+use Filament\Actions\Action;
+use Filament\Actions\ActionGroup;
+use Filament\Actions\BulkAction;
+use Filament\Actions\BulkActionGroup;
+use Filament\Actions\DeleteAction;
+use Filament\Actions\EditAction;
+use Filament\Forms\Components\Select;
+use Filament\Forms\Components\TextInput;
+use Filament\Forms\Components\Toggle;
 use Filament\Notifications\Notification;
 use Filament\Resources\Resource;
-use Filament\Tables;
+use Filament\Schemas\Components\Group as ComponentsGroup;
+use Filament\Schemas\Components\Section;
+use Filament\Schemas\Components\Utilities\Get;
+use Filament\Schemas\Schema;
+use Filament\Tables\Columns\IconColumn;
+use Filament\Tables\Columns\TextColumn;
+use Filament\Tables\Columns\TextInputColumn;
 use Filament\Tables\Columns\ToggleColumn;
+use Filament\Tables\Enums\RecordActionsPosition;
 use Filament\Tables\Table;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Collection;
-use Illuminate\Database\Eloquent\SoftDeletingScope;
-use App\Traits\HasUserFiltering;
 
 class GroupResource extends Resource
 {
@@ -49,6 +42,7 @@ class GroupResource extends Resource
     protected static ?string $recordTitleAttribute = 'name';
 
     protected static ?string $label = 'Live Group';
+
     protected static ?string $pluralLabel = 'Groups';
 
     public static function getGloballySearchableAttributes(): array
@@ -56,7 +50,7 @@ class GroupResource extends Resource
         return ['name', 'name_internal'];
     }
 
-    protected static string | \UnitEnum | null $navigationGroup = 'Live Channels';
+    protected static string|\UnitEnum|null $navigationGroup = 'Live Channels';
 
     public static function getNavigationSort(): ?int
     {
@@ -92,7 +86,7 @@ class GroupResource extends Resource
                 TextInputColumn::make('name')
                     ->label('Name')
                     ->rules(['min:0', 'max:255'])
-                    ->placeholder(fn($record) => $record->name_internal)
+                    ->placeholder(fn ($record) => $record->name_internal)
                     ->searchable()
                     ->sortable(query: function (Builder $query, string $direction): Builder {
                         return $query
@@ -106,15 +100,15 @@ class GroupResource extends Resource
                     ->type('number')
                     ->placeholder('Sort Order')
                     ->sortable()
-                    ->tooltip(fn($record) => $record->playlist->auto_sort ? 'Playlist auto-sort enabled; any changes will be overwritten on next sync' : 'Group sort order')
+                    ->tooltip(fn ($record) => $record->playlist->auto_sort ? 'Playlist auto-sort enabled; any changes will be overwritten on next sync' : 'Group sort order')
                     ->toggleable(),
                 ToggleColumn::make('enabled')
                     ->label('Auto Enable')
                     ->toggleable()
                     ->tooltip('Auto enable newly added group channels')
-                    ->tooltip(fn($record) => $record->playlist?->enable_channels ? 'Playlist auto-enable new channels is enabled, all group channels will automatically be enabled on next sync.' : 'Auto enable newly added group channels')
-                    ->disabled(fn($record) => $record->playlist?->enable_channels)
-                    ->getStateUsing(fn($record) => $record->playlist?->enable_channels ? true : $record->enabled)
+                    ->tooltip(fn ($record) => $record->playlist?->enable_channels ? 'Playlist auto-enable new channels is enabled, all group channels will automatically be enabled on next sync.' : 'Auto enable newly added group channels')
+                    ->disabled(fn ($record) => $record->playlist?->enable_channels)
+                    ->getStateUsing(fn ($record) => $record->playlist?->enable_channels ? true : $record->enabled)
                     ->sortable(),
                 TextColumn::make('name_internal')
                     ->label('Default name')
@@ -122,16 +116,16 @@ class GroupResource extends Resource
                     ->sortable(),
                 TextColumn::make('live_channels_count')
                     ->label('Live Channels')
-                    ->description(fn(Group $record): string => "Enabled: {$record->enabled_live_channels_count}")
+                    ->description(fn (Group $record): string => "Enabled: {$record->enabled_live_channels_count}")
                     ->toggleable()
                     ->sortable(),
                 IconColumn::make('custom')
                     ->label('Custom')
-                    ->icon(fn(string $state): string => match ($state) {
+                    ->icon(fn (string $state): string => match ($state) {
                         '1' => 'heroicon-o-check-circle',
                         '0' => 'heroicon-o-minus-circle',
                         '' => 'heroicon-o-minus-circle',
-                    })->color(fn(string $state): string => match ($state) {
+                    })->color(fn (string $state): string => match ($state) {
                         '1' => 'success',
                         '0' => 'danger',
                         '' => 'danger',
@@ -154,58 +148,14 @@ class GroupResource extends Resource
             ])
             ->recordActions([
                 ActionGroup::make([
-                    ViewAction::make(),
-                    Action::make('add')
-                        ->label('Add to Custom Playlist')
-                        ->schema([
-                            Select::make('playlist')
-                                ->required()
-                                ->live()
-                                ->label('Custom Playlist')
-                                ->helperText('Select the custom playlist you would like to add the selected channel(s) to.')
-                                ->options(CustomPlaylist::where(['user_id' => auth()->id()])->get(['name', 'id'])->pluck('name', 'id'))
-                                ->afterStateUpdated(function (Set $set, $state) {
-                                    if ($state) {
-                                        $set('category', null);
-                                    }
-                                })
-                                ->searchable(),
-                            Select::make('category')
-                                ->label('Custom Group')
-                                ->disabled(fn(Get $get) => !$get('playlist'))
-                                ->helperText(fn(Get $get) => !$get('playlist') ? 'Select a custom playlist first.' : 'Select the group you would like to assign to the selected channel(s) to.')
-                                ->options(function ($get) {
-                                    $customList = CustomPlaylist::find($get('playlist'));
-                                    return $customList ? $customList->groupTags()->get()
-                                        ->mapWithKeys(fn($tag) => [$tag->getAttributeValue('name') => $tag->getAttributeValue('name')])
-                                        ->toArray() : [];
-                                })
-                                ->searchable(),
-                        ])
-                        ->action(function ($record, array $data): void {
-                            $playlist = CustomPlaylist::findOrFail($data['playlist']);
-                            $playlist->channels()->syncWithoutDetaching($record->channels()->pluck('id'));
-                            if ($data['category']) {
-                                $tags = $playlist->groupTags()->get();
-                                $tag = $playlist->groupTags()->where('name->en', $data['category'])->first();
-                                foreach ($record->channels()->cursor() as $channel) {
-                                    // Need to detach any existing tags from this playlist first
-                                    $channel->detachTags($tags);
-                                    $channel->attachTag($tag);
-                                }
-                            }
-                        })->after(function () {
+                    PlaylistService::getAddToPlaylistAction('add', 'channel', fn ($record) => $record->channels())
+                        ->after(function () {
                             Notification::make()
                                 ->success()
                                 ->title('Group channels added to custom playlist')
                                 ->body('The groups channels have been added to the chosen custom playlist.')
                                 ->send();
-                        })
-                        ->requiresConfirmation()
-                        ->icon('heroicon-o-play')
-                        ->modalIcon('heroicon-o-play')
-                        ->modalDescription('Add the group channels to the chosen custom playlist.')
-                        ->modalSubmitActionLabel('Add now'),
+                        }),
                     Action::make('move')
                         ->label('Move Channels to Group')
                         ->schema([
@@ -214,10 +164,10 @@ class GroupResource extends Resource
                                 ->live()
                                 ->label('Group')
                                 ->helperText('Select the group you would like to move the channels to.')
-                                ->options(fn(Get $get, $record) => Group::where([
+                                ->options(fn (Get $get, $record) => Group::where([
                                     'type' => 'live',
                                     'user_id' => auth()->id(),
-                                    'playlist_id' => $record->playlist_id
+                                    'playlist_id' => $record->playlist_id,
                                 ])->get(['name', 'id'])->pluck('name', 'id'))
                                 ->searchable(),
                         ])
@@ -239,6 +189,86 @@ class GroupResource extends Resource
                         ->modalIcon('heroicon-o-arrows-right-left')
                         ->modalDescription('Move the group channels to the another group.')
                         ->modalSubmitActionLabel('Move now'),
+
+                    Action::make('recount')
+                        ->label('Recount Channels')
+                        ->icon('heroicon-o-hashtag')
+                        ->schema([
+                            TextInput::make('start')
+                                ->label('Start Number')
+                                ->numeric()
+                                ->default(1)
+                                ->required(),
+                        ])
+                        ->action(function (Group $record, array $data): void {
+                            $start = (int) $data['start'];
+                            SortFacade::bulkRecountGroupChannels($record, $start);
+                        })
+                        ->after(function () {
+                            Notification::make()
+                                ->success()
+                                ->title('Channels Recounted')
+                                ->body('The channels in this group have been recounted.')
+                                ->send();
+                        })
+                        ->requiresConfirmation()
+                        ->modalIcon('heroicon-o-hashtag')
+                        ->modalDescription('Recount all channels in this group sequentially? Channel numbers will be assigned based on the current sort order.'),
+                    Action::make('sort_alpha')
+                        ->label('Sort Alpha')
+                        ->icon('heroicon-o-bars-arrow-down')
+                        ->schema([
+                            Select::make('column')
+                                ->label('Sort By')
+                                ->options([
+                                    'title' => 'Title (or override if set)',
+                                    'name' => 'Name (or override if set)',
+                                    'stream_id' => 'ID (or override if set)',
+                                    'channel' => 'Channel No.',
+                                ])
+                                ->default('title')
+                                ->required(),
+                            Select::make('sort')
+                                ->label('Sort Order')
+                                ->options([
+                                    'ASC' => 'A to Z or 0 to 9',
+                                    'DESC' => 'Z to A or 9 to 0',
+                                ])
+                                ->default('ASC')
+                                ->required(),
+                        ])
+                        ->action(function (Group $record, array $data): void {
+                            $order = $data['sort'] ?? 'ASC';
+                            $column = $data['column'] ?? 'title';
+                            SortFacade::bulkSortGroupChannels($record, $order, $column);
+                        })
+                        ->after(function () {
+                            Notification::make()
+                                ->success()
+                                ->title('Channels Sorted')
+                                ->body('The channels in this group have been sorted alphabetically.')
+                                ->send();
+                        })
+                        ->requiresConfirmation()
+                        ->modalIcon('heroicon-o-bars-arrow-down')
+                        ->modalDescription('Sort all channels in this group alphabetically? This will update the sort order.'),
+
+                    PlaylistService::getMergeAction(groupScoped: true)
+                        ->after(function () {
+                            Notification::make()
+                                ->success()
+                                ->title('Channel merge started')
+                                ->body('Merging channels in the background for this group only. You will be notified once the process is complete.')
+                                ->send();
+                        }),
+                    PlaylistService::getUnmergeAction(groupScoped: true)
+                        ->after(function () {
+                            Notification::make()
+                                ->success()
+                                ->title('Channel unmerge started')
+                                ->body('Unmerging channels for this group in the background. You will be notified once the process is complete.')
+                                ->send();
+                        }),
 
                     Action::make('enable')
                         ->label('Enable group channels')
@@ -278,69 +308,23 @@ class GroupResource extends Resource
                         ->modalIcon('heroicon-o-x-circle')
                         ->modalDescription('Disable group channels now?')
                         ->modalSubmitActionLabel('Yes, disable now'),
-
                     DeleteAction::make()
-                        ->hidden(fn($record) => !$record->custom),
+                        ->hidden(fn ($record) => ! $record->custom),
                 ])->button()->hiddenLabel()->size('sm'),
+                EditAction::make()
+                    ->button()->hiddenLabel()->size('sm'),
             ], position: RecordActionsPosition::BeforeCells)
             ->toolbarActions([
                 BulkActionGroup::make([
-                    BulkAction::make('add')
-                        ->label('Add to Custom Playlist')
-                        ->schema([
-                            Select::make('playlist')
-                                ->required()
-                                ->live()
-                                ->label('Custom Playlist')
-                                ->helperText('Select the custom playlist you would like to add the selected group channel(s) to.')
-                                ->options(CustomPlaylist::where(['user_id' => auth()->id()])->get(['name', 'id'])->pluck('name', 'id'))
-                                ->afterStateUpdated(function (Set $set, $state) {
-                                    if ($state) {
-                                        $set('category', null);
-                                    }
-                                })
-                                ->searchable(),
-                            Select::make('category')
-                                ->label('Custom Group')
-                                ->disabled(fn(Get $get) => !$get('playlist'))
-                                ->helperText(fn(Get $get) => !$get('playlist') ? 'Select a custom playlist first.' : 'Select the group you would like to assign to the selected channel(s) to.')
-                                ->options(function ($get) {
-                                    $customList = CustomPlaylist::find($get('playlist'));
-                                    return $customList ? $customList->groupTags()->get()
-                                        ->mapWithKeys(fn($tag) => [$tag->getAttributeValue('name') => $tag->getAttributeValue('name')])
-                                        ->toArray() : [];
-                                })
-                                ->searchable(),
-                        ])
-                        ->action(function (Collection $records, array $data): void {
-                            $playlist = CustomPlaylist::findOrFail($data['playlist']);
-                            $tags = $playlist->groupTags()->get();
-                            $tag = $data['category'] ? $playlist->groupTags()->where('name->en', $data['category'])->first() : null;
-                            foreach ($records as $record) {
-                                // Sync the channels to the custom playlist
-                                // This will add the channels to the playlist without detaching existing ones
-                                // Prevents duplicates in the playlist
-                                $playlist->channels()->syncWithoutDetaching($record->channels()->pluck('id'));
-                                if ($data['category']) {
-                                    foreach ($record->channels()->cursor() as $channel) {
-                                        // Need to detach any existing tags from this playlist first
-                                        $channel->detachTags($tags);
-                                        $channel->attachTag($tag);
-                                    }
-                                }
-                            }
-                        })->after(function () {
-                            Notification::make()
-                                ->success()
-                                ->title('Group channels added to custom playlist')
-                                ->body('The groups channels have been added to the chosen custom playlist.')
-                                ->send();
-                        })
-                        ->requiresConfirmation()
-                        ->icon('heroicon-o-play')
-                        ->modalIcon('heroicon-o-play')
-                        ->modalDescription('Add the group channels to the chosen custom playlist.')
-                        ->modalSubmitActionLabel('Add now'),
+                    PlaylistService::getAddToPlaylistBulkAction('add', 'channel', function (Collection $records) {
+                        return $records->flatMap->channels;
+                    })->after(function () {
+                        Notification::make()
+                            ->success()
+                            ->title('Group channels added to custom playlist')
+                            ->body('The groups channels have been added to the chosen custom playlist.')
+                            ->send();
+                    }),
                     BulkAction::make('move')
                         ->label('Move Channels to Group')
                         ->schema([
@@ -350,13 +334,13 @@ class GroupResource extends Resource
                                 ->label('Group')
                                 ->helperText('Select the group you would like to move the channels to.')
                                 ->options(
-                                    fn() => Group::query()
+                                    fn () => Group::query()
                                         ->with(['playlist'])
                                         ->where(['user_id' => auth()->id(), 'type' => 'live'])
                                         ->get(['name', 'id', 'playlist_id'])
-                                        ->transform(fn($group) => [
+                                        ->transform(fn ($group) => [
                                             'id' => $group->id,
-                                            'name' => $group->name . ' (' . $group->playlist->name . ')',
+                                            'name' => $group->name.' ('.$group->playlist->name.')',
                                         ])->pluck('name', 'id')
                                 )->searchable(),
                         ])
@@ -373,6 +357,7 @@ class GroupResource extends Resource
                                         ->body("Cannot move \"{$group->name}\" to \"{$record->name}\" as they belong to different playlists.")
                                         ->persistent()
                                         ->send();
+
                                     continue;
                                 }
                                 $record->channels()->update([
@@ -478,6 +463,41 @@ class GroupResource extends Resource
                         ->modalIcon('heroicon-o-x-circle')
                         ->modalDescription('Disable the selected group(s) now?')
                         ->modalSubmitActionLabel('Yes, disable now'),
+                    BulkAction::make('recount_channels')
+                        ->label('Recount Channels')
+                        ->icon('heroicon-o-hashtag')
+                        ->form([
+                            TextInput::make('start')
+                                ->label('Start Number')
+                                ->numeric()
+                                ->default(1)
+                                ->required(),
+                        ])
+                        ->action(function (Collection $records, array $data): void {
+                            // Sort the selected groups by their sort_order to ensure sequential processing
+                            // that matches the visual order in the table (assuming table is sorted by sort_order)
+                            $sortedRecords = $records->sortBy('sort_order');
+                            $start = (int) $data['start'];
+
+                            foreach ($sortedRecords as $record) {
+                                // Get channels for this group ordered by their current sort
+                                $channels = $record->channels()->orderBy('sort')->get();
+                                foreach ($channels as $channel) {
+                                    $channel->update(['channel' => $start++]);
+                                }
+                            }
+                        })
+                        ->after(function () {
+                            Notification::make()
+                                ->success()
+                                ->title('Channels Recounted')
+                                ->body('The channels in the selected groups have been recounted sequentially.')
+                                ->send();
+                        })
+                        ->deselectRecordsAfterCompletion()
+                        ->requiresConfirmation()
+                        ->modalIcon('heroicon-o-hashtag')
+                        ->modalDescription('Recount channels across selected groups? This will renumber channels sequentially starting from the top-most selected group down to the bottom-most.'),
                 ]),
             ]);
     }
@@ -494,38 +514,21 @@ class GroupResource extends Resource
         return [
             'index' => ListGroups::route('/'),
             // 'create' => Pages\CreateGroup::route('/create'),
-            'view' => ViewGroup::route('/{record}'),
-            // 'edit' => Pages\EditGroup::route('/{record}/edit'),
+            'edit' => EditGroup::route('/{record}/edit'),
         ];
-    }
-
-    public static function infolist(Schema $schema): Schema
-    {
-        // return parent::infolist($infolist);
-        return $schema
-            ->components([
-                Section::make('Group Details')
-                    ->collapsible(true)
-                    ->collapsed(true)
-                    ->compact()
-                    ->columns(2)
-                    ->schema([
-                        TextEntry::make('name')
-                            ->badge(),
-                        TextEntry::make('playlist.name')
-                            ->label('Playlist')
-                            //->badge(),
-                            ->url(fn($record) => PlaylistResource::getUrl('edit', ['record' => $record->playlist_id])),
-                    ])
-            ]);
     }
 
     public static function getForm(): array
     {
-        return [
+        $fields = [
             TextInput::make('name')
                 ->required()
                 ->maxLength(255),
+            Toggle::make('enabled')
+                ->inline(false)
+                ->label('Auto Enable New Channels')
+                ->helperText('Automatically enable newly added channels to this group.')
+                ->default(true),
             Select::make('playlist_id')
                 ->required()
                 ->label('Playlist')
@@ -540,6 +543,20 @@ class GroupResource extends Resource
                 ->default(9999)
                 ->helperText('Enter a number to define the sort order (e.g., 1, 2, 3). Lower numbers appear first.')
                 ->rules(['integer', 'min:0']),
+        ];
+
+        return [
+            Section::make('Group Settings')
+                ->compact()
+                ->columns(2)
+                ->icon('heroicon-s-cog')
+                ->collapsed(true)
+                ->schema($fields)
+                ->hiddenOn(['create']),
+            ComponentsGroup::make($fields)
+                ->columnSpanFull()
+                ->columns(2)
+                ->hiddenOn(['edit']),
         ];
     }
 }

@@ -3,11 +3,12 @@
 namespace App\Services;
 
 use App\Models\Channel;
+use App\Models\CustomPlaylist;
 use App\Models\Episode;
+use App\Models\MergedPlaylist;
 use App\Models\Playlist;
 use App\Models\PlaylistAlias;
-use App\Models\CustomPlaylist;
-use App\Models\MergedPlaylist;
+use App\Models\PlaylistProfile;
 
 /**
  * Service to handle playlist URL retrieval and alias management.
@@ -15,11 +16,9 @@ use App\Models\MergedPlaylist;
 class PlaylistUrlService
 {
     /**
-     * Get the effective URL for a channel, considering PlaylistAlias context
-     * 
-     * @param Channel $channel
-     * @param Playlist|CustomPlaylist|MergedPlaylist|PlaylistAlias|null $context
-     * @return string
+     * Get the effective URL for a channel, considering PlaylistAlias or PlaylistProfile context
+     *
+     * @param  Playlist|CustomPlaylist|MergedPlaylist|PlaylistAlias|PlaylistProfile|null  $context
      */
     public static function getChannelUrl(Channel $channel, $context = null): string
     {
@@ -41,20 +40,28 @@ class PlaylistUrlService
             return $context->transformChannelUrl($channel);
         }
 
+        // If context is a PlaylistProfile, transform the URL with profile credentials
+        if ($context instanceof PlaylistProfile) {
+            return $context->transformChannelUrl($channel);
+        }
+
         return $channel->url ?? '';
     }
 
     /**
-     * Get the effective URL for an episode, considering PlaylistAlias context
-     * 
-     * @param Episode $episode
-     * @param Playlist|CustomPlaylist|MergedPlaylist|PlaylistAlias|null $context
-     * @return string
+     * Get the effective URL for an episode, considering PlaylistAlias or PlaylistProfile context
+     *
+     * @param  Playlist|CustomPlaylist|MergedPlaylist|PlaylistAlias|PlaylistProfile|null  $context
      */
     public static function getEpisodeUrl(Episode $episode, $context = null): string
     {
         // If context is a PlaylistAlias, transform the URL
         if ($context instanceof PlaylistAlias) {
+            return $context->transformEpisodeUrl($episode);
+        }
+
+        // If context is a PlaylistProfile, transform the URL with profile credentials
+        if ($context instanceof PlaylistProfile) {
             return $context->transformEpisodeUrl($episode);
         }
 
@@ -64,9 +71,6 @@ class PlaylistUrlService
     /**
      * Resolve the best available PlaylistAlias for streaming
      * This method can be used to implement failover functionality
-     * 
-     * @param Playlist $playlist
-     * @return PlaylistAlias|Playlist|null
      */
     public static function getAvailableAlias(Playlist $playlist): PlaylistAlias|Playlist|null
     {
@@ -104,8 +108,7 @@ class PlaylistUrlService
 
     /**
      * Get the streaming URL for a channel with automatic alias selection
-     * 
-     * @param Channel $channel
+     *
      * @return array ['url' => string, 'context' => Playlist|PlaylistAlias]
      */
     public static function getOptimalChannelStream(Channel $channel): array
@@ -118,7 +121,7 @@ class PlaylistUrlService
             if ($availableAlias) {
                 return [
                     'url' => self::getChannelUrl($channel, $availableAlias),
-                    'context' => $availableAlias
+                    'context' => $availableAlias,
                 ];
             }
         }
@@ -126,14 +129,13 @@ class PlaylistUrlService
         // Fall back to primary playlist
         return [
             'url' => self::getChannelUrl($channel, $playlist),
-            'context' => $playlist
+            'context' => $playlist,
         ];
     }
 
     /**
      * Get the streaming URL for an episode with automatic alias selection
-     * 
-     * @param Episode $episode
+     *
      * @return array ['url' => string, 'context' => Playlist|PlaylistAlias]
      */
     public static function getOptimalEpisodeStream(Episode $episode): array
@@ -146,7 +148,7 @@ class PlaylistUrlService
             if ($availableAlias) {
                 return [
                     'url' => self::getEpisodeUrl($episode, $availableAlias),
-                    'context' => $availableAlias
+                    'context' => $availableAlias,
                 ];
             }
         }
@@ -154,7 +156,7 @@ class PlaylistUrlService
         // Fall back to primary playlist
         return [
             'url' => self::getEpisodeUrl($episode, $playlist),
-            'context' => $playlist
+            'context' => $playlist,
         ];
     }
 }

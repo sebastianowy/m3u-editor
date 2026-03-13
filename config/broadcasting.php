@@ -32,9 +32,9 @@ return [
 
         'reverb' => [
             'driver' => 'reverb',
-            'key' => '5e2a227aacd3bc04713e595428195896617947b8f5ec11db31029abd13b13538', // env('REVERB_APP_KEY'),
-            'secret' => env('REVERB_APP_SECRET'),
-            'app_id' => env('REVERB_APP_ID'),
+            'key' => '5e2a227aacd3bc04713e595428195896617947b8f5ec11db31029abd13b13538', // <-- IMPORTANT --- IGNORE --- This is a fixed value for this app, do not change it. You will need to update the echo.js file and run `npm run build` if you change the app key
+            'secret' => env('REVERB_APP_SECRET', null), // Optional: will be auto-generated if not set, but you can set a fixed value if you want to avoid it changing on each deploy
+            'app_id' => env('REVERB_APP_ID', 'm3u-editor'),
             'options' => [
                 'host' => env('REVERB_HOST', 'localhost'),
                 'port' => env('REVERB_PORT', 36800),
@@ -54,7 +54,7 @@ return [
             'app_id' => env('PUSHER_APP_ID'),
             'options' => [
                 'cluster' => env('PUSHER_APP_CLUSTER'),
-                'host' => env('PUSHER_HOST') ?: 'api-' . env('PUSHER_APP_CLUSTER', 'mt1') . '.pusher.com',
+                'host' => env('PUSHER_HOST') ?: 'api-'.env('PUSHER_APP_CLUSTER', 'mt1').'.pusher.com',
                 'port' => env('PUSHER_PORT', 443),
                 'scheme' => env('PUSHER_SCHEME', 'https'),
                 'encrypted' => true,

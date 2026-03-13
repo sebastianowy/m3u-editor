@@ -2,10 +2,10 @@
 
 namespace Database\Factories;
 
-use Illuminate\Database\Eloquent\Factories\Factory;
-use Illuminate\Support\Str;
 use App\Models\Epg;
 use App\Models\EpgChannel;
+use App\Models\User;
+use Illuminate\Database\Eloquent\Factories\Factory;
 
 class EpgChannelFactory extends Factory
 {
@@ -27,7 +27,7 @@ class EpgChannelFactory extends Factory
             'lang' => $this->faker->word(),
             'channel_id' => $this->faker->word(),
             'epg_id' => Epg::factory(),
-            'programmes' => $this->faker->text(),
+            'user_id' => User::factory(),
         ];
     }
 }

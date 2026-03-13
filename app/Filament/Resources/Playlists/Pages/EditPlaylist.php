@@ -2,22 +2,41 @@
 
 namespace App\Filament\Resources\Playlists\Pages;
 
-use Filament\Actions\ViewAction;
-use App\Enums\Status;
+use App\Filament\Resources\MediaServerIntegrations\MediaServerIntegrationResource;
+use App\Filament\Resources\Networks\NetworkResource;
 use App\Filament\Resources\Playlists\PlaylistResource;
 use App\Filament\Resources\Playlists\Widgets\ImportProgress;
 use App\Models\Playlist;
-use Filament\Actions;
-use Filament\Forms;
-use Filament\Notifications\Notification;
+use Filament\Actions\ViewAction;
 use Filament\Resources\Pages\EditRecord;
-use Illuminate\Support\Facades\Redis;
 
 class EditPlaylist extends EditRecord
 {
-    //use EditRecord\Concerns\HasWizard;
+    // use EditRecord\Concerns\HasWizard;
 
     protected static string $resource = PlaylistResource::class;
+
+    public function mount(int|string $record): void
+    {
+        parent::mount($record);
+
+        /** @var Playlist $playlist */
+        $playlist = $this->getRecord();
+
+        // If this playlist belongs to a media server integration, redirect to edit that instead
+        if ($integration = $playlist->mediaServerIntegration) {
+            $this->redirect(MediaServerIntegrationResource::getUrl('edit', ['record' => $integration->id]));
+
+            return;
+        }
+
+        // If this playlist has networks (is a network playlist), redirect to the networks list
+        if ($playlist->networks()->exists()) {
+            $this->redirect(NetworkResource::getUrl('index'));
+
+            return;
+        }
+    }
 
     public function hasSkippableSteps(): bool
     {
@@ -27,7 +46,7 @@ class EditPlaylist extends EditRecord
     public function getVisibleHeaderWidgets(): array
     {
         return [
-            ImportProgress::class
+            ImportProgress::class,
         ];
     }
 

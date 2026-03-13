@@ -16,8 +16,8 @@ use Throwable;
 
 class ProcessVodChannels implements ShouldQueue
 {
-    use Queueable;
     use ProviderRequestDelay;
+    use Queueable;
 
     // Don't retry the job on failure
     public $tries = 1;
@@ -51,12 +51,14 @@ class ProcessVodChannels implements ShouldQueue
         }
         if ($playlist === null) {
             Log::error('Unable to process VOD channels: Playlist is null');
+
             return;
         }
 
         // If processing a single channel, use direct processing
         if ($this->channel) {
             $this->processSingleChannel($xtream, $playlist);
+
             return;
         }
 
@@ -73,26 +75,27 @@ class ProcessVodChannels implements ShouldQueue
             playlist: $playlist,
             retryLimit: 5
         );
-        if (!$xtream) {
-            Log::error('Xtream service initialization failed for playlist ID ' . $playlist->id);
+        if (! $xtream) {
+            Log::error('Xtream service initialization failed for playlist ID '.$playlist->id);
+
             return;
         }
 
         try {
             // Use provider throttling to limit concurrent requests and apply delay
             $this->withProviderThrottling(fn () => $this->channel->fetchMetadata($xtream));
-            Log::info('Completed processing VOD data for channel ID ' . $this->channel->id);
+            Log::info('Completed processing VOD data for channel ID '.$this->channel->id);
             Notification::make()
                 ->title('VOD Channel Processed')
-                ->body('Successfully processed VOD data for channel: ' . $this->channel->name)
+                ->body('Successfully processed VOD data for channel: '.$this->channel->name)
                 ->success()
                 ->broadcast($playlist->user)
                 ->sendToDatabase($playlist->user);
         } catch (\Exception $e) {
-            Log::error('Failed to process VOD data for channel ID ' . $this->channel->id . ': ' . $e->getMessage());
+            Log::error('Failed to process VOD data for channel ID '.$this->channel->id.': '.$e->getMessage());
             Notification::make()
                 ->title('VOD Processing Error')
-                ->body('Failed to process VOD data for channel: ' . $this->channel->name . '. Error: ' . $e->getMessage())
+                ->body('Failed to process VOD data for channel: '.$this->channel->name.'. Error: '.$e->getMessage())
                 ->danger()
                 ->broadcast($playlist->user)
                 ->sendToDatabase($playlist->user);
@@ -111,17 +114,14 @@ class ProcessVodChannels implements ShouldQueue
                 ['enabled', true],
                 ['source_id', '!=', null],
             ])
-            ->when(!$this->force, function ($query) {
-                return $query->where(function ($query) {
-                    $query->whereNull('info')
-                        ->orWhereNull('movie_data');
-                });
+            ->when(! $this->force, function ($query) {
+                return $query->whereNull('last_metadata_fetch');
             });
 
         $total = $query->count();
 
         if ($total === 0) {
-            Log::info('No VOD channels to process for playlist ID ' . $playlist->id);
+            Log::info('No VOD channels to process for playlist ID '.$playlist->id);
             $playlist->update([
                 'processing' => [
                     ...$playlist->processing ?? [],
@@ -130,6 +130,11 @@ class ProcessVodChannels implements ShouldQueue
                 'status' => Status::Completed,
                 'vod_progress' => 100,
             ]);
+
+            // Still dispatch the completion job so TMDB fetch and stream file sync run
+            // even when there are no new channels to fetch metadata for.
+            dispatch(new ProcessVodChannelsComplete(playlist: $playlist));
+
             return;
         }
 

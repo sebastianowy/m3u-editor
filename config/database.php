@@ -1,7 +1,5 @@
 <?php
 
-use Illuminate\Support\Str;
-
 return [
 
     /*
@@ -45,6 +43,14 @@ return [
             'synchronous' => 'NORMAL',
             'cache_size' => 10000,
             'busy_timeout' => 30000,
+        ],
+
+        'sqlite_testing' => [
+            'driver' => 'sqlite',
+            'url' => env('DB_URL'),
+            'database' => ':memory:',
+            'prefix' => '',
+            'foreign_key_constraints' => env('DB_FOREIGN_KEYS', true),
         ],
 
         'jobs' => [
@@ -120,12 +126,12 @@ return [
 
         'pg_test' => [
             'driver' => 'pgsql',
-            'url' => env('DB_URL'),
-            'host' => env('DB_HOST', '127.0.0.1'),
-            'port' => env('DB_PORT', '5432'),
-            'database' => env('TEST_DB_DATABASE', 'm3ue_test'),
-            'username' => env('TEST_DB_USERNAME', 'postgres'),
-            'password' => env('TEST_DB_PASSWORD', 'root'),
+            'url' => env('TEST_DB_URL'), // Don't use DB_URL - it connects to production!
+            'host' => env('TEST_DB_HOST', env('DB_HOST', '127.0.0.1')),
+            'port' => env('TEST_DB_PORT', env('DB_PORT', '5432')),
+            'database' => env('TEST_DB_DATABASE', 'm3ue_test'), // SEPARATE test database
+            'username' => env('TEST_DB_USERNAME', env('DB_USERNAME', 'postgres')),
+            'password' => env('TEST_DB_PASSWORD', env('DB_PASSWORD', 'root')),
             'charset' => env('TEST_DB_CHARSET', 'utf8'),
             'prefix' => '',
             'prefix_indexes' => true,

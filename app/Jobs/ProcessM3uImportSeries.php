@@ -2,23 +2,22 @@
 
 namespace App\Jobs;
 
-use Exception;
 use App\Enums\Status;
 use App\Events\SyncCompleted;
 use App\Models\Playlist;
+use Exception;
 use Filament\Notifications\Notification;
-use Illuminate\Support\Str;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Queue\Queueable;
-use Illuminate\Support\Facades\Bus;
 use Illuminate\Support\Facades\Log;
-use Throwable;
+use Illuminate\Support\Str;
 
 class ProcessM3uImportSeries implements ShouldQueue
 {
     use Queueable;
 
     public $tries = 1;
+
     public $timeout = 60 * 60 * 1; // 1 hour
 
     /**
@@ -26,9 +25,9 @@ class ProcessM3uImportSeries implements ShouldQueue
      */
     public function __construct(
         public Playlist $playlist,
-        public ?bool    $force = false,
-        public ?bool    $isNew = false,
-        public ?string  $batchNo = null,
+        public ?bool $force = false,
+        public ?bool $isNew = false,
+        public ?string $batchNo = null,
 
     ) {}
 
@@ -37,20 +36,20 @@ class ProcessM3uImportSeries implements ShouldQueue
      */
     public function handle(): void
     {
-        if (!$this->force) {
+        if (! $this->force) {
             // Don't update if currently processing
             if ($this->playlist->isProcessingSeries()) {
                 return;
             }
 
             // Check if auto sync is enabled, or the playlist hasn't been synced yet
-            if (!$this->playlist->auto_sync && $this->playlist->synced) {
+            if (! $this->playlist->auto_sync && $this->playlist->synced) {
                 return;
             }
         }
 
         // Set the batch number
-        if (!$this->batchNo) {
+        if (! $this->batchNo) {
             $this->batchNo = Str::orderedUuid()->toString();
         }
 
@@ -73,49 +72,22 @@ class ProcessM3uImportSeries implements ShouldQueue
     public function importSeries(): void
     {
         try {
-            $jobs = [];
-            $series = $this->playlist->series()->where('enabled', true)->cursor();
-            foreach ($series as $seriesItem) {
-                $jobs[] = new ProcessM3uImportSeriesEpisodes(
-                    playlistSeries: $seriesItem,
-                    notify: false, // don't notify user for bulk syncs
-                );
-            }
-            $jobs[] = new ProcessM3uImportSeriesComplete(
-                playlist: $this->playlist,
-                batchNo: $this->batchNo,
-            );
-            $playlist = $this->playlist;
-            Bus::chain($jobs)
-                ->onConnection('redis') // force to use redis connection
-                ->onQueue('import')
-                ->catch(function (Throwable $e) use ($playlist) {
-                    $error = "Error processing series sync on \"{$playlist->name}\": {$e->getMessage()}";
-                    Log::error($error);
-                    Notification::make()
-                        ->danger()
-                        ->title("Error processing series sync on \"{$playlist->name}\"")
-                        ->body('Please view your notifications for details.')
-                        ->broadcast($playlist->user);
-                    Notification::make()
-                        ->danger()
-                        ->title("Error processing series sync on \"{$playlist->name}\"")
-                        ->body($error)
-                        ->sendToDatabase($playlist->user);
-                    $playlist->update([
-                        'status' => Status::Failed,
-                        'synced' => now(),
-                        'errors' => $error,
-                        'series_progress' => 100,
-                        'processing' => [
-                            ...$playlist->processing ?? [],
-                            'series_processing' => false,
-                        ],
-                    ]);
+            // Use the new bulk dispatcher pattern instead of creating individual jobs
+            // This prevents flooding Redis with thousands of jobs
+            dispatch(new ProcessM3uImportSeriesEpisodes(
+                playlistSeries: null,  // null triggers bulk mode
+                notify: true,
+                all_playlists: false,
+                playlist_id: $this->playlist->id,
+                overwrite_existing: false,
+                user_id: $this->playlist->user_id,
+                sync_stream_files: (bool) $this->playlist->auto_sync_series_stream_files,
+            ));
 
-                    // Fire the playlist synced event
-                    event(new SyncCompleted($playlist));
-                })->dispatch();
+            Log::info('ProcessM3uImportSeries: Dispatched bulk series sync', [
+                'playlist_id' => $this->playlist->id,
+                'playlist_name' => $this->playlist->name,
+            ]);
         } catch (Exception $e) {
             // Update the playlist status to error
             $error = Str::limit($e->getMessage(), 255);
@@ -141,7 +113,7 @@ class ProcessM3uImportSeries implements ShouldQueue
             ]);
 
             // Fire the playlist synced event
-            event(new SyncCompleted($playlist));
+            event(new SyncCompleted($this->playlist));
         }
     }
 }

@@ -2,28 +2,22 @@
 
 namespace App\Filament\Resources\Series\RelationManagers;
 
-use App\Facades\LogoFacade;
-use Filament\Schemas\Schema;
-use Filament\Tables\Columns\Layout\Stack;
-use Filament\Tables\Columns\ImageColumn;
-use Filament\Tables\Columns\TextColumn;
-use Filament\Tables\Columns\Layout\Grid;
-use Filament\Actions\ViewAction;
 use Filament\Actions;
 use Filament\Actions\Action;
-use Filament\Schemas\Components\Section;
-use Filament\Infolists\Components\TextEntry;
+use Filament\Actions\ViewAction;
 use Filament\Infolists\Components\ImageEntry;
-use Filament\Forms;
-use Filament\Infolists;
+use Filament\Infolists\Components\TextEntry;
 use Filament\Notifications\Notification;
 use Filament\Resources\RelationManagers\RelationManager;
-use Filament\Tables;
+use Filament\Schemas\Components\Section;
+use Filament\Schemas\Schema;
+use Filament\Tables\Columns\ImageColumn;
+use Filament\Tables\Columns\TextColumn;
 use Filament\Tables\Columns\ToggleColumn;
+use Filament\Tables\Enums\RecordActionsPosition;
 use Filament\Tables\Table;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Collection;
-use Illuminate\Database\Eloquent\SoftDeletingScope;
 
 class EpisodesRelationManager extends RelationManager
 {
@@ -48,96 +42,94 @@ class EpisodesRelationManager extends RelationManager
             ->modifyQueryUsing(function (Builder $query) {
                 $query->with(['season', 'series', 'playlist']);
             })
-            ->recordAction(null)
             ->defaultGroup('season')
             ->defaultSort('episode_num', 'asc')
-            ->contentGrid([
-                'md' => 2,
-                'lg' => 3,
-                'xl' => 4,
-            ])
             ->recordUrl(null) // Disable default record URL behavior
-            ->paginated([12, 24, 48, 100])
-            ->defaultPaginationPageOption(12)
+            ->paginated([10, 25, 50, 100])
+            ->defaultPaginationPageOption(25)
             ->columns([
+                ImageColumn::make('info.movie_image')
+                    ->label('Cover')
+                    ->height(60)
+                    ->width(40)
+                    ->getStateUsing(function ($record) {
+                        $info = $record->info ?? [];
+
+                        return $info['movie_image'] ?? $info['cover_big'] ?? null;
+                    })
+                    ->defaultImageUrl('/images/placeholder-episode.png'),
+
+                TextColumn::make('title')
+                    ->limit(50)
+                    ->tooltip(fn ($record) => $record->title),
+
                 ToggleColumn::make('enabled')
                     ->label('Enabled'),
-                Stack::make([
-                    ImageColumn::make('info.movie_image')
-                        ->label('')
-                        ->height(200)
-                        ->width('full')
-                        ->extraImgAttributes(['class' => 'episode-placeholder rounded-t-lg object-cover w-full h-48'])
-                        ->checkFileExistence(false)
-                        ->getStateUsing(fn($record) => LogoFacade::getEpisodeLogoUrl($record)),
 
-                    Stack::make([
-                        TextColumn::make('title')
-                            ->weight('semibold')
-                            ->size('sm')
-                            ->limit(50)
-                            ->tooltip(fn($record) => $record->title),
+                TextColumn::make('info.plot')
+                    ->label('Plot')
+                    ->limit(50)
+                    ->tooltip(fn ($record) => $record->plot ?? $record->info['plot'] ?? null)
+                    ->getStateUsing(function ($record) {
+                        // Check the dedicated plot column first, then fall back to info.plot
+                        if (! empty($record->plot)) {
+                            return $record->plot;
+                        }
+                        $info = $record->info ?? [];
 
-                        TextColumn::make('episode_info')
-                            ->label('')
-                            ->size('xs')
-                            ->color('gray')
-                            ->getStateUsing(function ($record) {
-                                $seasonName = $record->season ? "Season {$record->season}" : 'Unknown Season';
-                                $episodeNum = $record->episode_num ? "Episode {$record->episode_num}" : '';
-                                return trim("{$seasonName} {$episodeNum}");
-                            }),
+                        return $info['plot'] ?? null;
+                    })
+                    ->placeholder('No description available'),
 
-                        TextColumn::make('info.plot')
-                            ->label('')
-                            ->limit(100)
-                            ->size('xs')
-                            ->color('gray')
-                            ->tooltip(fn($record) => $record->info['plot'] ?? null)
-                            ->getStateUsing(function ($record) {
-                                $info = $record->info ?? [];
-                                return $info['plot'] ?? null;
-                            })
-                            ->placeholder('No description available'),
+                TextColumn::make('series.category.name')
+                    ->label('Category')
+                    ->searchable()
+                    ->toggleable()
+                    ->sortable(),
 
-                        Grid::make(2)
-                            ->schema([
-                                TextColumn::make('info.duration')
-                                    ->label('Duration')
-                                    ->badge()
-                                    ->size('xs')
-                                    ->color('primary')
-                                    ->icon('heroicon-m-clock')
-                                    ->getStateUsing(function ($record) {
-                                        $info = $record->info ?? [];
-                                        return $info['duration'] ?? null;
-                                    }),
+                TextColumn::make('season')
+                    ->label('Season #')
+                    ->searchable()
+                    ->sortable(),
 
-                                TextColumn::make('info.rating')
-                                    ->label('Rating')
-                                    ->badge()
-                                    ->size('xs')
-                                    ->color('success')
-                                    ->icon('heroicon-m-star')
-                                    ->getStateUsing(function ($record) {
-                                        $info = $record->info ?? [];
-                                        return $info['rating'] ?? null;
-                                    }),
-                            ]),
+                TextColumn::make('episode_num')
+                    ->label('Ep #')
+                    ->searchable()
+                    ->sortable(),
 
-                        TextColumn::make('info.release_date')
-                            ->label('')
-                            ->date()
-                            ->size('xs')
-                            ->color('gray')
-                            ->prefix('Released: ')
-                            ->getStateUsing(function ($record) {
-                                $info = $record->info ?? [];
-                                return $info['release_date'] ?? null;
-                            })
-                            ->placeholder(''),
-                    ])->space(2)->extraAttributes(['class' => 'p-4']),
-                ])->space(0)->extraAttributes(['class' => 'bg-white dark:bg-gray-800 rounded-lg shadow-sm ring-1 ring-gray-950/5 dark:ring-white/10 overflow-hidden']),
+                TextColumn::make('info.duration')
+                    ->label('Duration')
+                    ->badge()
+                    ->color('primary')
+                    ->icon('heroicon-m-clock')
+                    ->getStateUsing(function ($record) {
+                        $info = $record->info ?? [];
+
+                        return $info['duration'] ?? null;
+                    }),
+
+                TextColumn::make('info.rating')
+                    ->label('Rating')
+                    ->badge()
+                    ->color('success')
+                    ->icon('heroicon-m-star')
+                    ->getStateUsing(function ($record) {
+                        $info = $record->info ?? [];
+
+                        return $info['rating'] ?? null;
+                    }),
+
+                TextColumn::make('info.release_date')
+                    ->label('Release Date')
+                    ->date()
+                    ->color('gray')
+                    ->prefix('Released: ')
+                    ->getStateUsing(function ($record) {
+                        $info = $record->info ?? [];
+
+                        return $info['release_date'] ?? null;
+                    })
+                    ->placeholder(''),
             ])
             ->filters([
                 //
@@ -153,16 +145,14 @@ class EpisodesRelationManager extends RelationManager
                     })
                     ->icon('heroicon-s-play-circle')
                     ->button()
-                    ->hiddenLabel()
-                    ->size('sm'),
+                    ->hiddenLabel(),
                 ViewAction::make()
                     ->slideOver()
                     ->hiddenLabel()
                     ->icon('heroicon-m-information-circle')
                     ->button()
-                    ->size('xs')
                     ->tooltip('Episode Details'),
-            ])
+            ], position: RecordActionsPosition::BeforeCells)
             ->toolbarActions([
                 // @TODO - add download? Would need to generate streamlink files and compress then download...
 
@@ -238,6 +228,7 @@ class EpisodesRelationManager extends RelationManager
                             ->date()
                             ->getStateUsing(function ($record) {
                                 $info = $record->info ?? [];
+
                                 return $info['release_date'] ?? null;
                             }),
                     ]),
@@ -252,6 +243,7 @@ class EpisodesRelationManager extends RelationManager
                             ->columnSpan(1)
                             ->getStateUsing(function ($record) {
                                 $info = $record->info ?? [];
+
                                 return $info['movie_image'] ?? $info['cover_big'] ?? null;
                             }),
 
@@ -263,6 +255,7 @@ class EpisodesRelationManager extends RelationManager
                                     ->label('Duration')
                                     ->getStateUsing(function ($record) {
                                         $info = $record->info ?? [];
+
                                         return $info['duration'] ?? null;
                                     }),
                                 TextEntry::make('info.rating')
@@ -272,6 +265,7 @@ class EpisodesRelationManager extends RelationManager
                                     ->icon('heroicon-m-star')
                                     ->getStateUsing(function ($record) {
                                         $info = $record->info ?? [];
+
                                         return $info['rating'] ?? null;
                                     }),
                                 TextEntry::make('info.bitrate')
@@ -279,23 +273,27 @@ class EpisodesRelationManager extends RelationManager
                                     ->getStateUsing(function ($record) {
                                         $info = $record->info ?? [];
                                         $bitrate = $info['bitrate'] ?? null;
+
                                         return $bitrate ? "{$bitrate} kbps" : null;
                                     }),
                                 TextEntry::make('info.season')
                                     ->label('Season (Metadata)')
                                     ->getStateUsing(function ($record) {
                                         $info = $record->info ?? [];
+
                                         return $info['season'] ?? null;
                                     }),
                                 TextEntry::make('info.tmdb_id')
                                     ->label('TMDB ID')
                                     ->getStateUsing(function ($record) {
                                         $info = $record->info ?? [];
+
                                         return $info['tmdb_id'] ?? null;
                                     })
                                     ->url(function ($record) {
                                         $info = $record->info ?? [];
                                         $tmdbId = $info['tmdb_id'] ?? null;
+
                                         return $tmdbId ? "https://www.themoviedb.org/tv/episode/{$tmdbId}" : null;
                                     }, true),
                             ]),
@@ -305,6 +303,7 @@ class EpisodesRelationManager extends RelationManager
                             ->columnSpanFull()
                             ->getStateUsing(function ($record) {
                                 $info = $record->info ?? [];
+
                                 return $info['plot'] ?? 'No plot information available.';
                             }),
 
@@ -312,7 +311,7 @@ class EpisodesRelationManager extends RelationManager
                             ->label('Stream URL')
                             ->columnSpanFull()
                             ->copyable()
-                            ->url(fn($record) => $record->url)
+                            ->url(fn ($record) => $record->url)
                             ->openUrlInNewTab(),
                     ]),
             ]);

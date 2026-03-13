@@ -2,7 +2,6 @@
 
 namespace App\Jobs;
 
-use Throwable;
 use App\Enums\Status;
 use App\Models\Epg;
 use App\Services\EpgCacheService;
@@ -10,6 +9,7 @@ use Filament\Notifications\Notification;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Queue\Queueable;
 use Illuminate\Support\Facades\Log;
+use Throwable;
 
 class GenerateEpgCache implements ShouldQueue
 {
@@ -39,8 +39,23 @@ class GenerateEpgCache implements ShouldQueue
     public function handle(EpgCacheService $cacheService): void
     {
         $epg = Epg::where('uuid', $this->uuid)->first();
-        if (!$epg) {
+        if (! $epg) {
             Log::error("EPG with UUID {$this->uuid} not found for cache generation.");
+
+            return;
+        }
+
+        if ($epg->isMerged()) {
+            Log::info("Skipping cache generation for merged EPG {$epg->uuid}.");
+
+            $epg->update([
+                'status' => Status::Completed,
+                'is_cached' => false,
+                'cache_progress' => 0,
+                'processing_started_at' => null,
+                'processing_phase' => null,
+            ]);
+
             return;
         }
 
@@ -63,8 +78,15 @@ class GenerateEpgCache implements ShouldQueue
                 'processing_started_at' => null,
                 'processing_phase' => null,
             ]);
+
+            // Clear playlist EPG cache files AFTER new cache is generated
+            // This ensures users can still get cached EPG files during regeneration
+            foreach ($epg->getAllPlaylists() as $playlist) {
+                EpgCacheService::clearPlaylistEpgCacheFile($playlist);
+            }
+
             if ($this->notify) {
-                $msg = "Cache generated successfully in " . round($duration, 2) . " seconds";
+                $msg = 'Cache generated successfully in '.round($duration, 2).' seconds';
                 Notification::make()
                     ->success()
                     ->title("EPG cache created for \"{$epg->name}\"")
@@ -80,7 +102,7 @@ class GenerateEpgCache implements ShouldQueue
                 'processing_started_at' => null,
                 'processing_phase' => null,
             ]);
-            $error = "Failed to generate cache. You can try to run the cache generation again manually from the EPG management page.";
+            $error = 'Failed to generate cache. You can try to run the cache generation again manually from the EPG management page.';
             Notification::make()
                 ->danger()
                 ->title("Error creating cache for \"{$epg->name}\"")

@@ -5,11 +5,11 @@ namespace App\Models;
 use App\Enums\PlaylistChannelId;
 use App\Pivots\MergedPlaylistPivot;
 use App\Traits\ShortUrlTrait;
+use Illuminate\Database\Eloquent\Casts\Attribute;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\BelongsToMany;
-use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Database\Eloquent\Relations\HasManyThrough;
 use Illuminate\Database\Eloquent\Relations\MorphToMany;
 
@@ -31,10 +31,12 @@ class MergedPlaylist extends Model
         'proxy_options' => 'array',
         'short_urls_enabled' => 'boolean',
         'include_series_in_m3u' => 'boolean',
+        'include_networks_in_m3u' => 'boolean',
         'include_vod_in_m3u' => 'boolean',
         'custom_headers' => 'array',
         'strict_live_ts' => 'boolean',
-        'id_channel_by' => PlaylistChannelId::class
+        'use_sticky_session' => 'boolean',
+        'id_channel_by' => PlaylistChannelId::class,
     ];
 
     public function user(): BelongsTo
@@ -159,5 +161,21 @@ class MergedPlaylist extends Model
     public function postProcesses(): MorphToMany
     {
         return $this->morphToMany(PostProcess::class, 'processable');
+    }
+
+    public function enableProxy(): Attribute
+    {
+        return Attribute::make(
+            get: function ($value) {
+                if ($value) {
+                    // Check playlist user has access to proxy features
+                    if (! $this->user?->canUseProxy()) {
+                        return false;
+                    }
+                }
+
+                return $value;
+            }
+        );
     }
 }

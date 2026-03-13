@@ -2,13 +2,13 @@
 
 namespace App\Filament\Resources\CustomPlaylists\RelationManagers;
 
+use App\Facades\SortFacade;
 use App\Filament\Resources\Channels\ChannelResource;
 use App\Models\Channel;
 use Filament\Actions\AttachAction;
 use Filament\Actions\BulkAction;
 use Filament\Actions\CreateAction;
 use Filament\Actions\DetachAction;
-use Filament\Actions\DetachBulkAction;
 use Filament\Forms;
 use Filament\Forms\Components\Select;
 use Filament\Notifications\Notification;
@@ -24,9 +24,7 @@ use Filament\Tables\Table;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Collection;
 use Illuminate\Database\Eloquent\Model;
-use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\DB;
-use Spatie\Tags\Tag;
 
 class ChannelsRelationManager extends RelationManager
 {
@@ -81,19 +79,19 @@ class ChannelsRelationManager extends RelationManager
                     switch ($driver) {
                         case 'pgsql':
                             // PostgreSQL uses ->> operator for JSON
-                            $query->whereRaw('LOWER(tags.name->>\'$\') LIKE ?', ['%' . strtolower($search) . '%']);
+                            $query->whereRaw('LOWER(tags.name->>\'$\') LIKE ?', ['%'.strtolower($search).'%']);
                             break;
                         case 'mysql':
                             // MySQL uses JSON_EXTRACT
-                            $query->whereRaw('LOWER(JSON_EXTRACT(tags.name, "$")) LIKE ?', ['%' . strtolower($search) . '%']);
+                            $query->whereRaw('LOWER(JSON_EXTRACT(tags.name, "$")) LIKE ?', ['%'.strtolower($search).'%']);
                             break;
                         case 'sqlite':
                             // SQLite uses json_extract
-                            $query->whereRaw('LOWER(json_extract(tags.name, "$")) LIKE ?', ['%' . strtolower($search) . '%']);
+                            $query->whereRaw('LOWER(json_extract(tags.name, "$")) LIKE ?', ['%'.strtolower($search).'%']);
                             break;
                         default:
                             // Fallback - try to search the JSON as text
-                            $query->where(DB::raw('LOWER(CAST(tags.name AS TEXT))'), 'LIKE', '%' . strtolower($search) . '%');
+                            $query->where(DB::raw('LOWER(CAST(tags.name AS TEXT))'), 'LIKE', '%'.strtolower($search).'%');
                             break;
                     }
                 });
@@ -124,6 +122,31 @@ class ChannelsRelationManager extends RelationManager
                     ->distinct();
             });
         $defaultColumns = ChannelResource::getTableColumns(showGroup: true, showPlaylist: true);
+
+        // Replace the global editable "channel" column with a custom-playlist pivot channel number column
+        foreach ($defaultColumns as $i => $column) {
+            if (method_exists($column, 'getName') && $column->getName() === 'channel') {
+                $defaultColumns[$i] = Tables\Columns\TextInputColumn::make('custom_channel_number')
+                    ->label('Channel')
+                    ->type('number')
+                    ->rules(['nullable', 'numeric', 'min:0'])
+                    ->placeholder(fn ($record) => (string) $record->channel)
+                    ->getStateUsing(function ($record) {
+                        return $record->pivot?->channel_number ?? null;
+                    })
+                    ->updateStateUsing(function ($record, $state) use ($ownerRecord): void {
+                        $ownerRecord->channels()->updateExistingPivot(
+                            $record->id,
+                            ['channel_number' => ($state !== '' && $state !== null) ? (int) $state : null]
+                        );
+                    })
+                    ->sortable(query: function (Builder $query, string $direction): Builder {
+                        return $query->orderBy('channel_custom_playlist.channel_number', $direction);
+                    });
+
+                break;
+            }
+        }
 
         // Inject the custom group column after the group column
         array_splice($defaultColumns, 12, 0, [$groupColumn]);
@@ -158,7 +181,7 @@ class ChannelsRelationManager extends RelationManager
                         return $ownerRecord->tags()
                             ->where('type', $ownerRecord->uuid)
                             ->get()
-                            ->mapWithKeys(fn($tag) => [$tag->getAttributeValue('name') => $tag->getAttributeValue('name')])
+                            ->mapWithKeys(fn ($tag) => [$tag->getAttributeValue('name') => $tag->getAttributeValue('name')])
                             ->toArray();
                     })
                     ->query(function (Builder $query, array $data) use ($ownerRecord): Builder {
@@ -184,13 +207,13 @@ class ChannelsRelationManager extends RelationManager
                     ->schema(ChannelResource::getForm(customPlaylist: $ownerRecord))
                     ->modalHeading('New Custom Channel')
                     ->modalDescription('NOTE: Custom channels need to be associated with a Playlist or Custom Playlist.')
-                    ->using(fn(array $data, string $model): Model => ChannelResource::createCustomChannel(
+                    ->using(fn (array $data, string $model): Model => ChannelResource::createCustomChannel(
                         data: $data,
                         model: $model,
                     ))
                     ->slideOver(),
                 AttachAction::make()
-                    ->schema(fn(AttachAction $action): array => [
+                    ->schema(fn (AttachAction $action): array => [
                         $action
                             ->getRecordSelect()
                             ->getSearchResultsUsing(function (string $search) {
@@ -227,7 +250,20 @@ class ChannelsRelationManager extends RelationManager
 
                                 return "{$displayTitle} [{$playlistName}]";
                             }),
-                    ]),
+                    ])
+                    ->after(function () use ($ownerRecord): void {
+                        // Auto-enable proxy if the custom playlist now contains channels from pooled playlists
+                        if ($ownerRecord->hasPooledSourcePlaylists() && ! $ownerRecord->enable_proxy) {
+                            $ownerRecord->update(['enable_proxy' => true]);
+
+                            Notification::make()
+                                ->title('Proxy Enabled')
+                                ->body('Proxy mode was automatically enabled because this playlist now contains channels from source playlists with Provider Profiles enabled.')
+                                ->info()
+                                ->persistent()
+                                ->send();
+                        }
+                    }),
 
                 // Advanced attach when adding pivot values:
                 // Tables\Actions\AttachAction::make()->schema(fn(Tables\Actions\AttachAction $action): array => [
@@ -251,11 +287,36 @@ class ChannelsRelationManager extends RelationManager
                 ...ChannelResource::getTableActions(),
             ], position: RecordActionsPosition::BeforeCells)
             ->toolbarActions([
-                ...ChannelResource::getTableBulkActions(addToCustom: false),
+                ...ChannelResource::getTableBulkActions(addToCustom: false, includeRecount: false),
+                BulkAction::make('recount_custom')
+                    ->label('Recount Channels')
+                    ->icon('heroicon-o-hashtag')
+                    ->schema([
+                        Forms\Components\TextInput::make('start')
+                            ->label('Start Number')
+                            ->numeric()
+                            ->default(1)
+                            ->required(),
+                    ])
+                    ->action(function (Collection $records, array $data) use ($ownerRecord): void {
+                        $start = (int) $data['start'];
+                        SortFacade::bulkRecountCustomPlaylistChannels($ownerRecord, $records, $start);
+                    })
+                    ->after(function () {
+                        Notification::make()
+                            ->success()
+                            ->title('Custom Playlist Channels Recounted')
+                            ->body('The selected channels were recounted for this custom playlist only.')
+                            ->send();
+                    })
+                    ->requiresConfirmation()
+                    ->modalIcon('heroicon-o-hashtag')
+                    ->modalDescription('Recount the selected channels only inside this custom playlist. The original channel numbers will not change.')
+                    ->modalSubmitActionLabel('Recount now'),
                 BulkAction::make('detach')
                     ->label('Detach Selected')
                     ->action(function (Collection $records) use ($ownerRecord): void {
-                        $tags =  $ownerRecord->groupTags()->get();
+                        $tags = $ownerRecord->groupTags()->get();
                         foreach ($records as $record) {
                             $record->detachTags($tags);
                         }
@@ -279,9 +340,10 @@ class ChannelsRelationManager extends RelationManager
                     ->schema([
                         Select::make('group')
                             ->label('Select group')
+                            ->native(false)
                             ->options(
                                 $ownerRecord->groupTags()->get()
-                                    ->map(fn($name) => [
+                                    ->map(fn ($name) => [
                                         'id' => $name->getAttributeValue('name'),
                                         'name' => $name->getAttributeValue('name'),
                                     ])->pluck('id', 'name')
@@ -311,15 +373,14 @@ class ChannelsRelationManager extends RelationManager
             ]);
     }
 
-
     public function getTabs(): array
     {
         // Lets group the tabs by Custom Playlist tags
         $ownerRecord = $this->ownerRecord;
         $tags = $ownerRecord->tags()->where('type', $ownerRecord->uuid)->get();
         $tabs = $tags->map(
-            fn($tag) => Tab::make($tag->name)
-                ->modifyQueryUsing(fn($query) => $query->where('is_vod', false)->whereHas('tags', function ($tagQuery) use ($tag) {
+            fn ($tag) => Tab::make($tag->name)
+                ->modifyQueryUsing(fn ($query) => $query->where('is_vod', false)->whereHas('tags', function ($tagQuery) use ($tag) {
                     $tagQuery->where('type', $tag->type)
                         ->where('name->en', $tag->name);
                 }))
@@ -330,19 +391,20 @@ class ChannelsRelationManager extends RelationManager
         array_unshift(
             $tabs,
             Tab::make('All')
-                ->modifyQueryUsing(fn($query) => $query->where('is_vod', false))
+                ->modifyQueryUsing(fn ($query) => $query->where('is_vod', false))
                 ->badge($ownerRecord->channels()->where('is_vod', false)->count())
         );
         array_push(
             $tabs,
             Tab::make('Uncategorized')
-                ->modifyQueryUsing(fn($query) => $query->where('is_vod', false)->whereDoesntHave('tags', function ($tagQuery) use ($ownerRecord) {
+                ->modifyQueryUsing(fn ($query) => $query->where('is_vod', false)->whereDoesntHave('tags', function ($tagQuery) use ($ownerRecord) {
                     $tagQuery->where('type', $ownerRecord->uuid);
                 }))
                 ->badge($ownerRecord->channels()->where('is_vod', false)->whereDoesntHave('tags', function ($tagQuery) use ($ownerRecord) {
                     $tagQuery->where('type', $ownerRecord->uuid);
                 })->count())
         );
+
         return $tabs;
     }
 }

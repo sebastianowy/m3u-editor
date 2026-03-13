@@ -2,13 +2,13 @@
 
 namespace App\Filament\Resources\Series\Pages;
 
-use Filament\Actions\ActionGroup;
-use Filament\Actions\Action;
+use App\Filament\Resources\Series\SeriesResource;
 use App\Jobs\ProcessM3uImportSeriesEpisodes;
 use App\Jobs\SyncSeriesStrmFiles;
+use Filament\Actions\Action;
+use Filament\Actions\ActionGroup;
 use Filament\Actions\DeleteAction;
-use App\Filament\Resources\Series\SeriesResource;
-use Filament\Actions;
+use Filament\Actions\ViewAction;
 use Filament\Notifications\Notification;
 use Filament\Resources\Pages\EditRecord;
 
@@ -19,6 +19,9 @@ class EditSeries extends EditRecord
     protected function getHeaderActions(): array
     {
         return [
+            ViewAction::make()
+                ->label('View Series')
+                ->icon('heroicon-s-eye'),
             ActionGroup::make([
                 Action::make('process')
                     ->label('Fetch Series Metadata')
@@ -107,7 +110,7 @@ class EditSeries extends EditRecord
                     ->modalIcon('heroicon-o-trash')
                     ->modalDescription('Are you sure you want to delete this series? This will delete all episodes and seasons for this series. This action cannot be undone.')
                     ->modalSubmitActionLabel('Yes, delete series'),
-            ])->button()
+            ])->button(),
         ];
     }
 }

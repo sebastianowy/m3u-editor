@@ -3,17 +3,13 @@
 namespace App\Filament\Resources\StreamProfiles;
 
 use App\Models\StreamProfile;
-use BackedEnum;
 use Filament\Actions;
 use Filament\Actions\Action;
-use Filament\Forms;
 use Filament\Forms\Components\Select;
 use Filament\Forms\Components\Textarea;
 use Filament\Forms\Components\TextInput;
 use Filament\Resources\Resource;
 use Filament\Schemas\Schema;
-use Filament\Support\Icons\Heroicon;
-use Filament\Tables;
 use Filament\Tables\Columns\TextColumn;
 use Filament\Tables\Enums\RecordActionsPosition;
 use Filament\Tables\Table;
@@ -23,6 +19,15 @@ class StreamProfileResource extends Resource
     protected static ?string $model = StreamProfile::class;
 
     protected static string|\UnitEnum|null $navigationGroup = 'Proxy';
+
+    /**
+     * Check if the user can access this resource.
+     * Only users with proxy permission can access stream profiles.
+     */
+    public static function canAccess(): bool
+    {
+        return auth()->check() && auth()->user()->canUseProxy();
+    }
 
     public static function form(Schema $schema): Schema
     {
@@ -53,7 +58,7 @@ class StreamProfileResource extends Resource
                             ->icon('heroicon-o-arrow-top-right-on-square')
                             ->iconPosition('after')
                             ->size('sm')
-                            ->url('https://github.com/sparkison/m3u-proxy/blob/master/docs/PROFILE_VARIABLES.md')
+                            ->url('https://m3ue.sparkison.dev/docs/proxy/transcoding')
                             ->openUrlInNewTab(true)
                     )
                     ->default('-i {input_url} -c:v libx264 -preset faster -crf {crf|23} -maxrate {maxrate|2500k} -bufsize {bufsize|5000k} -c:a aac -b:a {audio_bitrate|192k} -f mpegts {output_args|pipe:1}')
@@ -72,7 +77,7 @@ class StreamProfileResource extends Resource
                         'm3u8' => 'HLS (.m3u8)',
                         'flv' => 'FLV (.flv)',
                         'ogg' => 'OGG (.ogg)',
-                        'mp3' => 'MP3 (.mp3)'
+                        'mp3' => 'MP3 (.mp3)',
                     ])
                     ->default('ts')
                     ->required()
@@ -126,8 +131,8 @@ class StreamProfileResource extends Resource
     {
         return [
             'index' => Pages\ListStreamProfiles::route('/'),
-            //'create' => Pages\CreateStreamProfile::route('/create'),
-            //'edit' => Pages\EditStreamProfile::route('/{record}/edit'),
+            // 'create' => Pages\CreateStreamProfile::route('/create'),
+            // 'edit' => Pages\EditStreamProfile::route('/{record}/edit'),
         ];
     }
 }

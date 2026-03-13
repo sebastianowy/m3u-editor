@@ -2,25 +2,24 @@
 
 namespace App\Filament\Pages;
 
+use App\Filament\Resources\Assets\AssetResource;
 use App\Jobs\RestartQueue;
 use App\Models\StreamProfile;
-use App\Rules\CheckIfUrlOrLocalPath;
 use App\Rules\Cron;
 use App\Services\M3uProxyService;
 use App\Services\PlaylistService;
-use App\Services\ProxyService;
 use App\Settings\GeneralSettings;
 use Cron\CronExpression;
 use Dom\Text;
 use Exception;
 use Filament\Actions\Action;
-use Filament\Forms;
-use Filament\Forms\Components\Radio;
+use Filament\Actions\ActionGroup;
+use Filament\Forms\Components\FileUpload;
 use Filament\Forms\Components\Select;
+use Filament\Forms\Components\TagsInput;
 use Filament\Forms\Components\Textarea;
 use Filament\Forms\Components\TextInput;
 use Filament\Forms\Components\Toggle;
-use Filament\Infolists\Components\TextEntry;
 use Filament\Notifications\Notification;
 use Filament\Pages\SettingsPage;
 use Filament\Schemas\Components\Fieldset;
@@ -30,17 +29,15 @@ use Filament\Schemas\Components\Section;
 use Filament\Schemas\Components\Tabs;
 use Filament\Schemas\Components\Tabs\Tab;
 use Filament\Schemas\Components\Utilities\Get;
-use Filament\Schemas\Components\Utilities\Set;
 use Filament\Schemas\Schema;
 use Filament\Support\Enums\Width;
 use Illuminate\Support\Facades\Artisan;
-use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Config;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Mail;
+use Illuminate\Support\Facades\Redis;
+use Illuminate\Support\HtmlString;
 use Illuminate\Support\Str;
-use ReflectionClass;
-use ReflectionProperty;
 
 class Preferences extends SettingsPage
 {
@@ -64,43 +61,62 @@ class Preferences extends SettingsPage
     protected function getActions(): array
     {
         return [
-            Action::make('Reset Queue')
-                ->label('Reset Queue')
-                ->action(function () {
-                    app('Illuminate\Contracts\Bus\Dispatcher')
-                        ->dispatch(new RestartQueue);
-                })
-                ->after(function () {
-                    Notification::make()
-                        ->success()
-                        ->title('Queue reset')
-                        ->body('The queue workers have been restarted and any pending jobs flushed. You may need to manually sync any Playlists or EPGs that were in progress.')
-                        ->duration(10000)
-                        ->send();
-                })
-                ->color('gray')
-                ->requiresConfirmation()
-                ->icon('heroicon-o-exclamation-triangle')
-                ->modalIcon('heroicon-o-exclamation-triangle')
-                ->modalDescription('Resetting the queue will restart the queue workers and flush any pending jobs. Any syncs or background processes will be stopped and removed. Only perform this action if you are having sync issues.')
-                ->modalSubmitActionLabel('I understand, reset now'),
-            Action::make('Clear Logo Cache')
-                ->label('Clear Logo Cache')
-                ->action(fn() => Artisan::call('app:logo-cleanup --force --all'))
-                ->after(function () {
-                    Notification::make()
-                        ->success()
-                        ->title('Logo cache cleared')
-                        ->body('The logo cache has been cleared successfully.')
-                        ->duration(10000)
-                        ->send();
-                })
-                ->color('gray')
-                ->requiresConfirmation()
-                ->icon('heroicon-o-exclamation-triangle')
-                ->modalIcon('heroicon-o-exclamation-triangle')
-                ->modalDescription('Clearing the logo cache will remove all cached logo images. This action cannot be undone.')
-                ->modalSubmitActionLabel('I understand, clear logo cache now'),
+            ActionGroup::make([
+                Action::make('Clear Expired Logo Cache')
+                    ->label('Clear Expired Logo Cache')
+                    ->action(fn () => Artisan::call('app:logo-cleanup --force'))
+                    ->after(function () {
+                        Notification::make()
+                            ->success()
+                            ->title('Expired logo cache cleared')
+                            ->body('Expired logo cache files were removed successfully.')
+                            ->duration(10000)
+                            ->send();
+                    })
+                    ->color('warning')
+                    ->requiresConfirmation()
+                    ->icon('heroicon-o-trash')
+                    ->modalIcon('heroicon-o-trash')
+                    ->modalDescription('Only expired logo cache entries (those older than 30 days). If permanent cache is enabled, nothing will be removed.')
+                    ->modalSubmitActionLabel('Clear expired cache'),
+                Action::make('Clear Logo Cache')
+                    ->label('Clear All Logo Cache')
+                    ->action(fn () => Artisan::call('app:logo-cleanup --force --all'))
+                    ->after(function () {
+                        Notification::make()
+                            ->success()
+                            ->title('Logo cache cleared')
+                            ->body('The logo cache has been cleared. Logos will be fetched again on next request wherever logo proxy is enabled.')
+                            ->duration(10000)
+                            ->send();
+                    })
+                    ->color('danger')
+                    ->requiresConfirmation()
+                    ->icon('heroicon-o-exclamation-triangle')
+                    ->modalIcon('heroicon-o-exclamation-triangle')
+                    ->modalDescription('Clearing the logo cache will remove all cached logo images. If permanent cache is enabled, it will be ignored. This action cannot be undone.')
+                    ->modalSubmitActionLabel('I understand, clear now'),
+                Action::make('Reset Queue')
+                    ->label('Reset Queue')
+                    ->action(function () {
+                        app('Illuminate\Contracts\Bus\Dispatcher')
+                            ->dispatch(new RestartQueue);
+                    })
+                    ->after(function () {
+                        Notification::make()
+                            ->success()
+                            ->title('Queue reset')
+                            ->body('The queue workers have been restarted and any pending jobs flushed. You may need to manually sync any Playlists or EPGs that were in progress.')
+                            ->duration(10000)
+                            ->send();
+                    })
+                    ->color('danger')
+                    ->requiresConfirmation()
+                    ->icon('heroicon-o-exclamation-triangle')
+                    ->modalIcon('heroicon-o-exclamation-triangle')
+                    ->modalDescription('Resetting the queue will restart the queue workers and flush any pending jobs. Any syncs or background processes will be stopped and removed. Only perform this action if you are having sync issues.')
+                    ->modalSubmitActionLabel('I understand, reset now'),
+            ])->button()->color('gray')->label('Actions'),
         ];
     }
 
@@ -111,10 +127,10 @@ class Preferences extends SettingsPage
         if (empty($m3uPublicUrl)) {
             $m3uPublicUrl = url('/m3u-proxy');
         }
-        $m3uProxyDocs = $m3uPublicUrl . '/docs';
+        $m3uProxyDocs = $m3uPublicUrl.'/docs';
 
         // Setup the service
-        $service = new M3uProxyService();
+        $service = new M3uProxyService;
         $mode = $service->mode();
         $embedded = $mode === 'embedded';
 
@@ -127,7 +143,7 @@ class Preferences extends SettingsPage
                     ->persistTabInQueryString()
                     ->columnSpanFull()
                     ->tabs([
-                        Tab::make('Appearance')
+                        Tab::make('General')
                             ->schema([
                                 Section::make('Layout & Display Options')
                                     ->schema([
@@ -150,9 +166,9 @@ class Preferences extends SettingsPage
                                                         if (config('dev.show_wan_details') !== null) {
                                                             $component->state((bool) config('dev.show_wan_details'));
                                                         }
-                                                    })->disabled(fn() => config('dev.show_wan_details') !== null)
-                                                    ->hint(fn() => config('dev.show_wan_details') !== null ? 'Already set by environment variable!' : null)
-                                                    ->dehydrated(fn() => config('dev.show_wan_details') === null),
+                                                    })->disabled(fn () => config('dev.show_wan_details') !== null)
+                                                    ->hint(fn () => config('dev.show_wan_details') !== null ? 'Already set by environment variable!' : null)
+                                                    ->dehydrated(fn () => config('dev.show_wan_details') === null),
                                             ]),
                                         Grid::make()
                                             ->columnSpanFull()
@@ -175,6 +191,52 @@ class Preferences extends SettingsPage
                                                         Width::Full->value => 'Full',
                                                     ]),
                                             ]),
+
+                                    ]),
+                                Section::make('Allowed Playlist Domains')
+                                    ->description('Restrict playlist URLs to specific domains. Leave empty to allow all domains.')
+                                    ->schema([
+                                        TagsInput::make('allowed_urls')
+                                            ->label('Allowed domains')
+                                            ->columnSpanFull()
+                                            ->placeholder(fn () => config('dev.allowed_playlist_domains') ? null : '*.example.com*')
+                                            ->helperText('List of allowed domains (supports wildcards, e.g. *.example.com*). Press return to add each domain. When set, playlist URLs must match one of these patterns.')
+                                            ->disabled(fn () => ! empty(config('dev.allowed_playlist_domains')))
+                                            ->hint(fn () => ! empty(config('dev.allowed_playlist_domains')) ? 'Already set by environment variable!' : null)
+                                            ->default(fn () => ! empty(config('dev.allowed_playlist_domains'))
+                                                ? array_map('trim', explode(',', config('dev.allowed_playlist_domains')))
+                                                : [])
+                                            ->afterStateHydrated(function (TagsInput $component, $state) {
+                                                if (! empty(config('dev.allowed_playlist_domains'))) {
+                                                    $component->state(array_map('trim', explode(',', config('dev.allowed_playlist_domains'))));
+                                                }
+                                            })
+                                            ->dehydrated(fn () => empty(config('dev.allowed_playlist_domains'))),
+                                    ]),
+                                Section::make('Xtream API Panel Settings')
+                                    ->schema([
+                                        Grid::make()
+                                            ->columnSpanFull()
+                                            ->columns(2)
+                                            ->schema([
+                                                TextInput::make('xtream_api_details.http_port')
+                                                    ->label('HTTP Port')
+                                                    ->numeric()
+                                                    ->placeholder(fn () => config('app.port', '80'))
+                                                    ->helperText('Returned as "server_info.http_port" in "player_api.php" responses. Leave empty to use APP_PORT (default).'),
+                                                TextInput::make('xtream_api_details.https_port')
+                                                    ->label('HTTPS Port')
+                                                    ->numeric()
+                                                    ->placeholder('443')
+                                                    ->helperText('Returned as "server_info.https_port" in "player_api.php" responses. Leave empty to use 443 (default).'),
+                                                Textarea::make('xtream_api_message')
+                                                    ->label('Xtream API panel message')
+                                                    ->helperText('Returned as "user_info.message" in "player_api.php" responses.')
+                                                    ->rows(3)
+                                                    ->columnSpanFull()
+                                                    ->default(''),
+
+                                            ]),
                                     ]),
                             ]),
                         Tab::make('Proxy')
@@ -191,7 +253,7 @@ class Preferences extends SettingsPage
                                                     ->columnSpanFull()
                                                     ->hintIcon(
                                                         'heroicon-m-question-mark-circle',
-                                                        tooltip: 'When enabled, the application will resolve the public-facing proxy URL using the incoming request host/scheme instead of the M3U_PROXY_PUBLIC_URL variable.'
+                                                        tooltip: 'When enabled, the application will resolve the public-facing proxy URL using the incoming request host/scheme instead of the Resolver URL.'
                                                     )
                                                     ->helperText('Useful for multi-host access (VPN/Tailscale/etc.)')
                                                     ->default(false),
@@ -205,20 +267,20 @@ class Preferences extends SettingsPage
                                                         'heroicon-m-question-mark-circle',
                                                         tooltip: 'If you would like the proxied streams to use a different base URL than the configured app url. Useful for local network access or when using a different domain for streaming.'
                                                     )
-                                                    ->disabled(fn() => ! empty(config('proxy.url_override')))
-                                                    ->hint(fn() => ! empty(config('proxy.url_override')) ? 'Already set by environment variable!' : null)
+                                                    ->disabled(fn () => ! empty(config('proxy.url_override')))
+                                                    ->hint(fn () => ! empty(config('proxy.url_override')) ? 'Already set by environment variable!' : null)
                                                     ->prefixIcon('heroicon-m-link')
-                                                    ->disabled(fn() => ! empty(config('proxy.url_override')))
-                                                    ->hint(fn() => ! empty(config('proxy.url_override')) ? 'Already set by environment variable!' : null)
-                                                    ->default(fn() => ! empty(config('proxy.url_override')) ? config('proxy.url_override') : '')
+                                                    ->disabled(fn () => ! empty(config('proxy.url_override')))
+                                                    ->hint(fn () => ! empty(config('proxy.url_override')) ? 'Already set by environment variable!' : null)
+                                                    ->default(fn () => ! empty(config('proxy.url_override')) ? config('proxy.url_override') : '')
                                                     ->afterStateHydrated(function (TextInput $component, $state) {
                                                         if (! empty(config('proxy.url_override'))) {
                                                             $component->state((string) config('proxy.url_override'));
                                                         }
                                                     })
-                                                    ->dehydrated(fn() => empty(config('proxy.url_override')))
+                                                    ->dehydrated(fn () => empty(config('proxy.url_override')))
                                                     ->placeholder('http://192.168.0.123:36400')
-                                                    ->helperText(fn() => 'Leave empty to use the configured app url (default).'),
+                                                    ->helperText(fn () => 'Leave empty to use the configured app url (default).'),
 
                                                 Toggle::make('url_override_include_logos')
                                                     ->label('Include logos in proxy URL override')
@@ -227,67 +289,80 @@ class Preferences extends SettingsPage
                                                         'heroicon-m-question-mark-circle',
                                                         tooltip: 'This is useful for Plex which need HTTPS for logo images. When using a domain with HTTPS for the frontend, but proxy URL override points to a local HTTP address, Plex may not load the logos due to HTTPS requirements. By enabling this option you can keep the stream proxy override for local access while logos still use the HTTPS domain URL that Plex requires.'
                                                     )
-                                                    ->disabled(fn() => config('proxy.url_override_include_logos') !== null)
-                                                    ->hint(fn() => config('proxy.url_override_include_logos') !== null ? 'Already set by environment variable!' : null)
-                                                    ->default(fn() => config('proxy.url_override_include_logos') !== null)
+                                                    ->disabled(fn () => config('proxy.url_override_include_logos') !== null)
+                                                    ->hint(fn () => config('proxy.url_override_include_logos') !== null ? 'Already set by environment variable!' : null)
+                                                    ->default(fn () => config('proxy.url_override_include_logos') !== null)
                                                     ->afterStateHydrated(function (Toggle $component, $state) {
                                                         if (config('proxy.url_override_include_logos') !== null) {
-                                                            $component->state((bool)  config('proxy.url_override_include_logos'));
+                                                            $component->state((bool) config('proxy.url_override_include_logos'));
                                                         }
                                                     })
-                                                    ->hidden(fn($get) => empty(config('proxy.url_override')) && empty($get('url_override')))
-                                                    ->dehydrated(fn() => empty(config('proxy.url_override_include_logos')))
+                                                    ->hidden(fn ($get) => empty(config('proxy.url_override')) && empty($get('url_override')))
+                                                    ->dehydrated(fn () => empty(config('proxy.url_override_include_logos')))
                                                     ->helperText('Whether or not to use the URL override for logos and images too (default is enabled).'),
                                             ]),
 
-                                        Fieldset::make('Failover settings')
+                                        Fieldset::make('Resolver settings')
                                             ->schema([
                                                 Toggle::make('enable_failover_resolver')
                                                     ->label('Enable advanced failover logic')
                                                     ->columnSpanFull()
+                                                    ->hintAction(
+                                                        Action::make('learn_more_strict_live_ts')
+                                                            ->label('Learn More')
+                                                            ->icon('heroicon-o-arrow-top-right-on-square')
+                                                            ->iconPosition('after')
+                                                            ->size('sm')
+                                                            ->url('https://m3ue.sparkison.dev/docs/proxy/failover#advanced-failover-m3u-editor')
+                                                            ->openUrlInNewTab(true)
+                                                    )
                                                     ->hintIcon(
                                                         'heroicon-m-question-mark-circle',
                                                         tooltip: 'When enabled, the proxy will make a call to the editor to determine which failover to use based on available capacity. When disabled, a list of failover URLs will be sent to the proxy and it will loop through them without any capacity checks when a stream failure occurs.'
                                                     )
                                                     ->live()
-                                                    ->disabled(fn() => ! empty(config('proxy.resolver_url')))
-                                                    ->hint(fn() => ! empty(config('proxy.resolver_url')) ? 'Already set by environment variable!' : null)
+                                                    ->disabled(fn () => ! empty(config('proxy.m3u_resolver_url')))
+                                                    ->hint(fn () => ! empty(config('proxy.m3u_resolver_url')) ? 'Already set by environment variable!' : null)
                                                     ->default(false)
                                                     ->afterStateHydrated(function (Toggle $component, $state) {
-                                                        if (! empty(config('proxy.resolver_url'))) {
-                                                            $component->state((bool) config('proxy.resolver_url'));
+                                                        if (! empty(config('proxy.m3u_resolver_url'))) {
+                                                            $component->state((bool) config('proxy.m3u_resolver_url'));
                                                         }
                                                     })
-                                                    ->dehydrated(fn() => empty(config('proxy.resolver_url')))
+                                                    ->dehydrated(fn () => empty(config('proxy.m3u_resolver_url')))
                                                     ->helperText('Use to enable advanced failover checking and resolution.'),
 
                                                 TextInput::make('failover_resolver_url')
-                                                    ->label('Failover Resolver URL')
+                                                    ->label('Resolver URL')
                                                     ->columnSpanFull()
                                                     ->url()
                                                     ->live()
+                                                    ->hintIcon(
+                                                        'heroicon-m-question-mark-circle',
+                                                        tooltip: 'The resolver URL is used for advanced failover logic, webhook registration for pooled providers, and Network Broadcasting features. This URL should point to the m3u-editor instance that the proxy can access.'
+                                                    )
                                                     ->prefixIcon('heroicon-m-link')
-                                                    ->disabled(fn() => ! empty(config('proxy.resolver_url')))
-                                                    ->hint(fn() => ! empty(config('proxy.resolver_url')) ? 'Already set by environment variable!' : null)
-                                                    ->default(fn() => ! empty(config('proxy.resolver_url')) ? config('proxy.resolver_url') : '')
+                                                    ->disabled(fn () => ! empty(config('proxy.m3u_resolver_url')))
+                                                    ->hint(fn () => ! empty(config('proxy.m3u_resolver_url')) ? 'Already set by environment variable!' : null)
+                                                    ->default(fn () => ! empty(config('proxy.m3u_resolver_url')) ? config('proxy.m3u_resolver_url') : '')
                                                     ->afterStateHydrated(function (TextInput $component, $state) {
-                                                        if (! empty(config('proxy.resolver_url'))) {
-                                                            $component->state((string) config('proxy.resolver_url'));
+                                                        if (! empty(config('proxy.m3u_resolver_url'))) {
+                                                            $component->state((string) config('proxy.m3u_resolver_url'));
                                                         }
                                                     })
-                                                    ->required(fn($get) => !! $get('enable_failover_resolver'))
-                                                    ->hidden(fn($get) => ! $get('enable_failover_resolver'))
-                                                    ->dehydrated(fn() => empty(config('proxy.resolver_url')))
-                                                    ->placeholder(fn() => $embedded ? 'http://127.0.0.1:' . config('app.port') : 'http://m3u-editor:36400')
-                                                    ->helperText(fn() => $embedded
-                                                        ? 'For embedded mode, you should use localhost, e.g.: "http://127.0.0.1:36400" or "http://localhost:36400".'
-                                                        : 'Domain the proxy can use to access the editor for faillover resolution, e.g.: "http://m3u-editor:36400", "http://192.168.0.101:36400", "http://your-domain.dev", etc.'),
+                                                    ->required(fn ($get) => (bool) $get('enable_failover_resolver'))
+                                                    ->dehydrated(fn () => empty(config('proxy.m3u_resolver_url')))
+                                                    ->placeholder(fn () => $embedded ? 'http://127.0.0.1:'.config('app.port') : 'http://m3u-editor:36400')
+                                                    ->helperText(fn () => $embedded
+                                                        ? 'Domain the proxy can use to access the editor for failover resolution and webhook registration, e.g.: "http://127.0.0.1:36400" or "http://localhost:36400".'
+                                                        : 'Domain the proxy can use to access the editor for failover resolution and webhook registration, e.g.: "http://m3u-editor:36400", "http://192.168.0.101:36400", "http://your-domain.dev", etc.'),
 
                                                 Action::make('test_failover_connection')
-                                                    ->label('Test failover resolver connection')
+                                                    ->label('Test resolver connection')
                                                     ->icon('heroicon-m-signal')
+                                                    ->disabled(fn ($get) => empty($get('failover_resolver_url')))
                                                     ->action(function ($get) use ($service) {
-                                                        $configUrl = config('proxy.resolver_url');
+                                                        $configUrl = config('proxy.m3u_resolver_url');
                                                         $url = $configUrl ?? $get('failover_resolver_url');
                                                         $url = rtrim($url, '/');
                                                         $result = $service->testResolver($url);
@@ -297,7 +372,7 @@ class Preferences extends SettingsPage
                                                                 ->success()
                                                                 ->title('Connection Successful')
                                                                 ->body(Str::markdown(
-                                                                    "**Proxy can reach the editor!**\n\n" .
+                                                                    "**Proxy can reach the editor!**\n\n".
                                                                         "URL tested: `{$result['url_tested']}`\n\n"
                                                                 ))
                                                                 ->duration(8000)
@@ -307,14 +382,70 @@ class Preferences extends SettingsPage
                                                                 ->danger()
                                                                 ->title('Connection Failed')
                                                                 ->body(Str::markdown(
-                                                                    "**The proxy cannot reach the editor**\n\n" .
-                                                                        $result['message'] . "\n\n" .
-                                                                        "Please verify the Failover Resolver URL is correct and accessible from the proxy container/service."
+                                                                    "**The proxy cannot reach the editor**\n\n".
+                                                                        $result['message']."\n\n".
+                                                                        'Please verify the Failover Resolver URL is correct and accessible from the proxy container/service.'
                                                                 ))
                                                                 ->duration(10000)
                                                                 ->send();
                                                         }
-                                                    })->hidden(fn($get) => ! $get('enable_failover_resolver')),
+                                                    }),
+                                            ]),
+
+                                        Fieldset::make('Failover conditions')
+                                            ->hidden(fn ($get) => ! (bool) $get('enable_failover_resolver'))
+                                            ->schema([
+                                                Toggle::make('failover_fail_conditions_enabled')
+                                                    ->label('Enable playlist fail conditions')
+                                                    ->columnSpanFull()
+                                                    ->live()
+                                                    ->hintIcon(
+                                                        'heroicon-m-question-mark-circle',
+                                                        tooltip: 'When enabled, playlists returning specific HTTP status codes will be temporarily marked as invalid during failover resolution. This enables account-level failover by skipping all channels from a failing playlist/account.'
+                                                    )
+                                                    ->helperText('Mark playlists as temporarily unavailable when specific HTTP errors are encountered during failover.'),
+
+                                                TagsInput::make('failover_fail_conditions')
+                                                    ->label('HTTP status codes')
+                                                    ->columnSpanFull()
+                                                    ->hidden(fn ($get) => ! (bool) $get('failover_fail_conditions_enabled'))
+                                                    ->placeholder('e.g. 403, 404, 502, 503')
+                                                    ->helperText('HTTP response codes that should mark a playlist as temporarily unavailable. All channels from the affected playlist will be skipped during failover resolution.'),
+
+                                                TextInput::make('failover_fail_conditions_timeout')
+                                                    ->label('Invalid timeout (minutes)')
+                                                    ->columnSpanFull()
+                                                    ->hidden(fn ($get) => ! (bool) $get('failover_fail_conditions_enabled'))
+                                                    ->numeric()
+                                                    ->minValue(1)
+                                                    ->default(5)
+                                                    ->suffixIcon('heroicon-m-clock')
+                                                    ->helperText('How long (in minutes) a playlist remains marked as invalid before being retried.'),
+
+                                                Action::make('clear_failed_playlists')
+                                                    ->label('Clear failed playlists')
+                                                    ->icon('heroicon-o-arrow-path')
+                                                    ->color('warning')
+                                                    ->hidden(fn ($get) => ! (bool) $get('failover_fail_conditions_enabled'))
+                                                    ->requiresConfirmation()
+                                                    ->modalIcon('heroicon-o-arrow-path')
+                                                    ->modalDescription('This will clear all playlists currently marked as invalid, allowing them to be used for failover again immediately.')
+                                                    ->modalSubmitActionLabel('Clear all')
+                                                    ->action(function () {
+                                                        $count = Redis::hlen('playlist_invalid');
+                                                        if ($count > 0) {
+                                                            Redis::del('playlist_invalid');
+                                                        }
+
+                                                        Notification::make()
+                                                            ->success()
+                                                            ->title('Failed playlists cleared')
+                                                            ->body($count > 0
+                                                                ? "Cleared {$count} invalid playlist(s). They are now eligible for failover again."
+                                                                : 'No invalid playlists found.')
+                                                            ->duration(5000)
+                                                            ->send();
+                                                    }),
                                             ]),
 
                                         Fieldset::make('Stream limit settings')
@@ -439,7 +570,7 @@ class Preferences extends SettingsPage
                                                 } catch (Exception $e) {
                                                     Notification::make()
                                                         ->title('Connection Failed')
-                                                        ->body('Could not connect to the m3u proxy instance. ' . $e->getMessage())
+                                                        ->body('Could not connect to the m3u proxy instance. '.$e->getMessage())
                                                         ->danger()
                                                         ->send();
                                                 }
@@ -510,6 +641,7 @@ class Preferences extends SettingsPage
                                             ->placeholder('VLC/3.0.21 LibVLC/3.0.21')
                                             ->columnSpan(2),
                                     ]),
+
                             ]),
 
                         Tab::make('Sync Options')
@@ -537,7 +669,7 @@ class Preferences extends SettingsPage
                                             ->step(100)
                                             ->default(500)
                                             ->suffix('ms')
-                                            ->hidden(fn($get) => ! $get('enable_provider_request_delay'))
+                                            ->hidden(fn ($get) => ! $get('enable_provider_request_delay'))
                                             ->helperText('Delay in milliseconds between requests.'),
                                         TextInput::make('provider_max_concurrent_requests')
                                             ->label('Max concurrent requests')
@@ -550,7 +682,7 @@ class Preferences extends SettingsPage
                                             ->minValue(1)
                                             ->maxValue(10)
                                             ->default(2)
-                                            ->hidden(fn($get) => ! $get('enable_provider_request_delay'))
+                                            ->hidden(fn ($get) => ! $get('enable_provider_request_delay'))
                                             ->helperText('Maximum number of simultaneous requests to the provider.'),
                                     ]),
                                 Section::make('Sync Invalidation')
@@ -560,10 +692,10 @@ class Preferences extends SettingsPage
                                     ->collapsible(false)
                                     ->schema([
                                         Toggle::make('invalidate_import')
-                                            ->label('Enable import invalidation')
-                                            ->disabled(fn() => ! empty(config('dev.invalidate_import')))
+                                            ->label('Enable sync invalidation')
+                                            ->disabled(fn () => ! empty(config('dev.invalidate_import')))
                                             ->live()
-                                            ->hint(fn() => ! empty(config('dev.invalidate_import')) ? 'Already set by environment variable!' : null)
+                                            ->hint(fn () => ! empty(config('dev.invalidate_import')) ? 'Already set by environment variable!' : null)
                                             ->default(function () {
                                                 return ! empty(config('dev.invalidate_import')) ? (bool) config('dev.invalidate_import') : false;
                                             })
@@ -572,351 +704,157 @@ class Preferences extends SettingsPage
                                                     $component->state((bool) config('dev.invalidate_import'));
                                                 }
                                             })
-                                            ->dehydrated(fn() => empty(config('dev.invalidate_import')))
-                                            ->helperText('Invalidate Playlist sync if conditon met.'),
+                                            ->dehydrated(fn () => empty(config('dev.invalidate_import'))),
                                         TextInput::make('invalidate_import_threshold')
-                                            ->label('Import invalidation threshold')
+                                            ->label('Sync invalidation threshold')
                                             ->columnSpan(2)
                                             ->hintIcon(
                                                 'heroicon-m-question-mark-circle',
-                                                tooltip: 'Some providers frequently remove and re-add groups/categories, which can lead to channels be removed during sync. This setting helps prevent large-scale removals by canceling the sync if too many channels would be removed.'
+                                                tooltip: 'Some providers frequently remove and re-add groups/categories, which can lead to channels be removed during sync. This setting helps prevent large-scale removals by canceling the sync if the defined number of channels would be removed.'
                                             )
-                                            ->suffixIcon(fn() => ! empty(config('dev.invalidate_import_threshold')) ? 'heroicon-m-lock-closed' : null)
-                                            ->disabled(fn() => ! empty(config('dev.invalidate_import_threshold')))
-                                            ->hint(fn() => ! empty(config('dev.invalidate_import_threshold')) ? 'Already set by environment variable!' : null)
-                                            ->dehydrated(fn() => empty(config('dev.invalidate_import_threshold')))
-                                            ->placeholder(fn() => empty(config('dev.invalidate_import_threshold')) ? 100 : config('dev.invalidate_import_threshold'))
-                                            ->hidden(fn($get) => ! empty(config('dev.invalidate_import')) || ! $get('invalidate_import'))
+                                            ->suffixIcon(fn () => ! empty(config('dev.invalidate_import_threshold')) ? 'heroicon-m-lock-closed' : null)
+                                            ->disabled(fn () => ! empty(config('dev.invalidate_import_threshold')))
+                                            ->hint(fn () => ! empty(config('dev.invalidate_import_threshold')) ? 'Already set by environment variable!' : null)
+                                            ->dehydrated(fn () => empty(config('dev.invalidate_import_threshold')))
+                                            ->placeholder(fn () => empty(config('dev.invalidate_import_threshold')) ? 100 : config('dev.invalidate_import_threshold'))
+                                            ->hidden(fn ($get) => ! empty(config('dev.invalidate_import')) || ! $get('invalidate_import'))
                                             ->numeric()
-                                            ->helperText('If the current sync will have less channels than the current channel count (less this value), the sync will be invalidated and canceled.'),
+                                            ->helperText('If sync will remove more than this number of channels, the sync will be canceled.'),
                                     ]),
                                 Section::make('Series stream file settings')
-                                    ->description('Generate .strm files and sync them to a local file path. Options can be overriden per Series on the Series edit page.')
+                                    ->description('Select a Stream File Setting for series .strm file generation.')
                                     ->columnSpan('full')
                                     ->columns(1)
                                     ->collapsible(false)
                                     ->schema([
-                                        Toggle::make('stream_file_sync_enabled')
-                                            ->live()
-                                            ->label('Enable .strm file generation'),
-                                        TextInput::make('stream_file_sync_location')
-                                            ->label('Series Sync Location')
-                                            ->live()
-                                            ->rules([new CheckIfUrlOrLocalPath(localOnly: true, isDirectory: true)])
-                                            ->helperText(function ($get) use ($seriesExample) {
-                                                $path = $get('stream_file_sync_location') ?? '';
-                                                $pathStructure = $get('stream_file_sync_path_structure') ?? [];
-                                                $filenameMetadata = $get('stream_file_sync_filename_metadata') ?? [];
-                                                $tmdbIdFormat = $get('stream_file_sync_tmdb_id_format') ?? 'square';
-
-                                                // Build path preview
-                                                $preview = 'Preview: ' . $path;
-
-                                                if (in_array('category', $pathStructure)) {
-                                                    $preview .= '/' . $seriesExample->category;
-                                                }
-                                                if (in_array('series', $pathStructure)) {
-                                                    $preview .= '/' . $seriesExample->series->metadata['name'];
-                                                }
-                                                if (in_array('season', $pathStructure)) {
-                                                    $preview .= '/Season ' . str_pad($seriesExample->info->season, 2, '0', STR_PAD_LEFT);
-                                                }
-
-                                                // Build filename preview
-                                                $season = str_pad($seriesExample->info->season, 2, '0', STR_PAD_LEFT);
-                                                $episode = str_pad($seriesExample->episode_num, 2, '0', STR_PAD_LEFT);
-                                                $filename = PlaylistService::makeFilesystemSafe("S{$season}E{$episode} - {$seriesExample->title}", $get('stream_file_sync_replace_char') ?? ' ');
-
-                                                // Add metadata to filename
-                                                if (in_array('year', $filenameMetadata) && ! empty($seriesExample->series->release_date)) {
-                                                    $year = substr($seriesExample->series->release_date, 0, 4);
-                                                    $filename .= " ({$year})";
-                                                }
-                                                if (in_array('tmdb_id', $filenameMetadata) && ! empty($seriesExample->info->tmdb_id)) {
-                                                    $bracket = $tmdbIdFormat === 'curly' ? ['{', '}'] : ['[', ']'];
-                                                    $filename .= " {$bracket[0]}tmdb-{$seriesExample->info->tmdb_id}{$bracket[1]}";
-                                                }
-
-                                                $preview .= '/' . $filename . '.strm';
-
-                                                return $preview;
+                                        Select::make('default_series_stream_file_setting_id')
+                                            ->label('Default Series Stream File Setting')
+                                            ->searchable()
+                                            ->hintIcon(
+                                                'heroicon-m-question-mark-circle',
+                                                tooltip: 'Stream File Settings can be created and managed in Playlist > Stream File Settings. Settings can be overridden at the Category level or per-Series.'
+                                            )
+                                            ->options(function () {
+                                                return \App\Models\StreamFileSetting::where('user_id', auth()->id())
+                                                    ->forSeries()
+                                                    ->pluck('name', 'id');
                                             })
-                                            ->maxLength(255)
-                                            ->required()
-                                            ->hidden(fn($get) => ! $get('stream_file_sync_enabled'))
-                                            ->placeholder('/Series'),
-                                        Forms\Components\ToggleButtons::make('stream_file_sync_path_structure')
-                                            ->label('Path structure (folders)')
-                                            ->live()
-                                            ->multiple()
-                                            ->grouped()
-                                            ->options([
-                                                'category' => 'Category',
-                                                'series' => 'Series',
-                                                'season' => 'Season',
-                                            ])
-                                            ->dehydrateStateUsing(function ($state, Set $set) {
-                                                // Update the old boolean fields for backwards compatibility
-                                                $state = $state ?? [];
-                                                $set('stream_file_sync_include_category', in_array('category', $state));
-                                                $set('stream_file_sync_include_series', in_array('series', $state));
-                                                $set('stream_file_sync_include_season', in_array('season', $state));
-
-                                                return $state;
-                                            })
-                                            ->hidden(fn($get) => ! $get('stream_file_sync_enabled')),
-                                        Fieldset::make('Include Metadata')
-                                            ->columnSpanFull()
-                                            ->schema([
-                                                Forms\Components\ToggleButtons::make('stream_file_sync_filename_metadata')
-                                                    ->label('Filename metadata')
-                                                    ->live()
-                                                    ->inline()
-                                                    ->multiple()
-                                                    ->columnSpanFull()
-                                                    ->options([
-                                                        'year' => 'Year',
-                                                        // 'resolution' => 'Resolution',
-                                                        // 'codec' => 'Codec',
-                                                        'tmdb_id' => 'TMDB ID',
-                                                    ])
-                                                    ->dehydrateStateUsing(function ($state, Set $set) {
-                                                        // Update the old boolean fields for backwards compatibility
-                                                        $state = $state ?? [];
-                                                        $set('stream_file_sync_filename_year', in_array('year', $state));
-                                                        $set('stream_file_sync_filename_resolution', in_array('resolution', $state));
-                                                        $set('stream_file_sync_filename_codec', in_array('codec', $state));
-                                                        $set('stream_file_sync_filename_tmdb_id', in_array('tmdb_id', $state));
-
-                                                        return $state;
-                                                    }),
-                                                Forms\Components\ToggleButtons::make('stream_file_sync_tmdb_id_format')
-                                                    ->label('TMDB ID format')
-                                                    ->inline()
-                                                    ->grouped()
-                                                    ->live()
-                                                    ->options([
-                                                        'square' => '[square]',
-                                                        'curly' => '{curly}',
-                                                    ])->hidden(fn($get) => ! in_array('tmdb_id', $get('stream_file_sync_filename_metadata') ?? [])),
-
-                                            ])
-                                            ->hidden(fn($get) => ! $get('stream_file_sync_enabled')),
-                                        Fieldset::make('Filename Cleansing')
-                                            ->columnSpanFull()
-                                            ->schema([
-                                                Toggle::make('stream_file_sync_clean_special_chars')
-                                                    ->label('Clean special characters')
-                                                    ->helperText('Remove or replace special characters in filenames')
-                                                    ->inline(false),
-                                                Toggle::make('stream_file_sync_remove_consecutive_chars')
-                                                    ->label('Remove consecutive replacement characters')
-                                                    ->inline(false)
-                                                    ->live(),
-                                                Forms\Components\ToggleButtons::make('stream_file_sync_replace_char')
-                                                    ->label('Replace with')
-                                                    ->live()
-                                                    ->inline()
-                                                    ->grouped()
-                                                    ->columnSpanFull()
-                                                    ->options([
-                                                        'space' => 'Space',
-                                                        'dash' => '-',
-                                                        'underscore' => '_',
-                                                        'period' => '.',
-                                                        'remove' => 'Remove',
-                                                    ]),
-                                            ])
-                                            ->hidden(fn($get) => ! $get('stream_file_sync_enabled')),
-                                        Fieldset::make('Name Filtering')
-                                            ->columnSpanFull()
-                                            ->schema([
-                                                Toggle::make('stream_file_sync_name_filter_enabled')
-                                                    ->label('Enable name filtering')
-                                                    ->helperText('Remove specific words or symbols from folder and file names (e.g. "DE • " from "DE • Action" → "Action")')
-                                                    ->inline(false)
-                                                    ->live(),
-                                                Forms\Components\TagsInput::make('stream_file_sync_name_filter_patterns')
-                                                    ->label('Patterns to remove')
-                                                    ->placeholder('Add pattern (e.g. "DE • " or "EN |")')
-                                                    ->helperText('Enter words, symbols or prefixes to remove from category, series and episode names. Press Enter after each pattern.')
-                                                    ->columnSpanFull()
-                                                    ->hidden(fn($get) => ! $get('stream_file_sync_name_filter_enabled')),
-                                            ])
-                                            ->hidden(fn($get) => ! $get('stream_file_sync_enabled')),
+                                            ->hintAction(
+                                                Action::make('manage_series_settings')
+                                                    ->label('Manage Stream File Settings')
+                                                    ->icon('heroicon-o-arrow-top-right-on-square')
+                                                    ->iconPosition('after')
+                                                    ->size('sm')
+                                                    ->url('/stream-file-settings')
+                                                    ->openUrlInNewTab(false)
+                                            )
+                                            ->helperText('Leave empty to disable .strm file generation for series. Priority: Series > Category > Global.'),
                                     ]),
                                 Section::make('VOD stream file settings')
-                                    ->description('Generate .strm files and sync them to a local file path. Options can be overriden per VOD in the VOD edit panel.')
+                                    ->description('Select a Stream File Setting for VOD .strm file generation. ')
                                     ->columnSpan('full')
                                     ->columns(1)
                                     ->collapsible(false)
                                     ->schema([
-                                        Toggle::make('vod_stream_file_sync_enabled')
-                                            ->live()
-                                            ->label('Enable .strm file generation'),
-                                        TextInput::make('vod_stream_file_sync_location')
-                                            ->label('VOD Sync Location')
-                                            ->live()
-                                            ->rules([new CheckIfUrlOrLocalPath(localOnly: true, isDirectory: true)])
-                                            ->helperText(function ($get) use ($vodExample) {
-                                                $path = $get('vod_stream_file_sync_location') ?? '';
-                                                $pathStructure = $get('vod_stream_file_sync_path_structure') ?? [];
-                                                $filenameMetadata = $get('vod_stream_file_sync_filename_metadata') ?? [];
-                                                $tmdbIdFormat = $get('vod_stream_file_sync_tmdb_id_format') ?? 'square';
-                                                $replaceChar = $get('vod_stream_file_sync_replace_char') ?? ' ';
-                                                $titleFolderEnabled = in_array('title', $pathStructure);
-
-                                                // Build path preview
-                                                $preview = 'Preview: ' . $path;
-
-                                                if (in_array('group', $pathStructure)) {
-                                                    $groupName = $vodExample->group->name ?? $vodExample->group ?? 'Uncategorized';
-                                                    $preview .= '/' . PlaylistService::makeFilesystemSafe($groupName, $replaceChar);
-                                                }
-                                                if ($titleFolderEnabled) {
-                                                    $titleFolder = PlaylistService::makeFilesystemSafe($vodExample->title, $replaceChar);
-                                                    // Add year to folder if available
-                                                    if (! empty($vodExample->year) && strpos($titleFolder, "({$vodExample->year})") === false) {
-                                                        $titleFolder .= " ({$vodExample->year})";
-                                                    }
-                                                    // Add TMDB/IMDB ID to folder for Trash Guides compatibility
-                                                    $tmdbId = $vodExample->info['tmdb_id'] ?? $vodExample->info['tmdb'] ?? $vodExample->movie_data['tmdb_id'] ?? $vodExample->movie_data['tmdb'] ?? null;
-                                                    $imdbId = $vodExample->info['imdb_id'] ?? $vodExample->info['imdb'] ?? $vodExample->movie_data['imdb_id'] ?? $vodExample->movie_data['imdb'] ?? null;
-                                                    $bracket = $tmdbIdFormat === 'curly' ? ['{', '}'] : ['[', ']'];
-                                                    if (! empty($tmdbId)) {
-                                                        $titleFolder .= " {$bracket[0]}tmdb-{$tmdbId}{$bracket[1]}";
-                                                    } elseif (! empty($imdbId)) {
-                                                        $titleFolder .= " {$bracket[0]}imdb-{$imdbId}{$bracket[1]}";
-                                                    }
-                                                    $preview .= '/' . $titleFolder;
-                                                }
-
-                                                // Build filename preview
-                                                $filename = PlaylistService::makeFilesystemSafe($vodExample->title, $replaceChar);
-
-                                                // Add year to filename
-                                                if (in_array('year', $filenameMetadata) && ! empty($vodExample->year)) {
-                                                    if (strpos($filename, "({$vodExample->year})") === false) {
-                                                        $filename .= " ({$vodExample->year})";
-                                                    }
-                                                }
-
-                                                // Only add TMDB/IMDB ID to filename if title folder is NOT enabled
-                                                // (If title folder exists, ID is already in the folder name)
-                                                $tmdbId = $vodExample->info['tmdb_id'] ?? $vodExample->info['tmdb'] ?? $vodExample->movie_data['tmdb_id'] ?? $vodExample->movie_data['tmdb'] ?? null;
-                                                $imdbId = $vodExample->info['imdb_id'] ?? $vodExample->info['imdb'] ?? $vodExample->movie_data['imdb_id'] ?? $vodExample->movie_data['imdb'] ?? null;
-                                                if (in_array('tmdb_id', $filenameMetadata) && ! $titleFolderEnabled) {
-                                                    $bracket = $tmdbIdFormat === 'curly' ? ['{', '}'] : ['[', ']'];
-                                                    if (! empty($tmdbId)) {
-                                                        $filename .= " {$bracket[0]}tmdb-{$tmdbId}{$bracket[1]}";
-                                                    } elseif (! empty($imdbId)) {
-                                                        $filename .= " {$bracket[0]}imdb-{$imdbId}{$bracket[1]}";
-                                                    }
-                                                }
-
-                                                $preview .= '/' . $filename . '.strm';
-
-                                                return $preview;
+                                        Select::make('default_vod_stream_file_setting_id')
+                                            ->label('Default VOD Stream File Setting')
+                                            ->searchable()
+                                            ->hintIcon(
+                                                'heroicon-m-question-mark-circle',
+                                                tooltip: 'Stream File Settings can be created and managed in Playlist > Stream File Settings. Settings can be overridden at the Group level or per-VOD channel.'
+                                            )
+                                            ->options(function () {
+                                                return \App\Models\StreamFileSetting::where('user_id', auth()->id())
+                                                    ->forVod()
+                                                    ->pluck('name', 'id');
                                             })
-                                            ->maxLength(255)
-                                            ->required()
-                                            ->hidden(fn($get) => ! $get('vod_stream_file_sync_enabled'))
-                                            ->placeholder('/VOD/movies'),
-                                        Forms\Components\ToggleButtons::make('vod_stream_file_sync_path_structure')
-                                            ->label('Path structure (folders)')
+                                            ->hintAction(
+                                                Action::make('manage_vod_settings')
+                                                    ->label('Manage Stream File Settings')
+                                                    ->icon('heroicon-o-arrow-top-right-on-square')
+                                                    ->iconPosition('after')
+                                                    ->size('sm')
+                                                    ->url('/stream-file-settings')
+                                                    ->openUrlInNewTab(false)
+                                            )
+                                            ->helperText('Leave empty to disable .strm file generation for VOD. Priority: VOD > Group > Global.'),
+                                    ]),
+                            ]),
+
+                        Tab::make('Assets')
+                            ->schema([
+                                Section::make('Logo Cache')
+                                    ->description('Manage logo cache behavior and storage used by logo proxy URLs.')
+                                    ->columns(1)
+                                    ->headerActions([
+                                        Action::make('manage_assets')
+                                            ->label('Manage Assets')
+                                            ->color('gray')
+                                            ->iconPosition('after')
+                                            ->size('sm')
+                                            ->url(AssetResource::getUrl('index')),
+                                        Action::make('view_repo')
+                                            ->label('View Logo Repository')
+                                            ->icon('heroicon-o-arrow-top-right-on-square')
+                                            ->iconPosition('after')
+                                            ->size('sm')
+                                            ->url('/logo-repository')
+                                            ->hidden(fn ($get) => ! $get('logo_repository_enabled'))
+                                            ->openUrlInNewTab(true),
+                                    ])
+                                    ->schema([
+                                        Toggle::make('logo_cache_permanent')
+                                            ->label('Keep cache permanently (disable expiry cleanup)')
+                                            ->helperText('When enabled, expired cache cleanup will skip deletion. You can still refresh/clear cache manually.'),
+                                        Toggle::make('logo_repository_enabled')
+                                            ->label('Enable Logo Repository endpoint')
                                             ->live()
-                                            ->inline()
-                                            ->multiple()
-                                            ->grouped()
-                                            ->options([
-                                                'group' => 'Group',
-                                                'title' => 'Title',
-                                            ])
-                                            ->dehydrateStateUsing(function ($state, Set $set) {
-                                                // Update the old boolean field for backwards compatibility
-                                                $state = $state ?? [];
-                                                $set('vod_stream_file_sync_include_season', in_array('group', $state));
+                                            ->helperText('When enabled, /logo-repository endpoints are publicly accessible for apps like UHF.'),
 
-                                                return $state;
-                                            })
-                                            ->hidden(fn($get) => ! $get('vod_stream_file_sync_enabled')),
-                                        Fieldset::make('Include Metadata')
-                                            ->columnSpanFull()
-                                            ->schema([
-                                                Forms\Components\ToggleButtons::make('vod_stream_file_sync_filename_metadata')
-                                                    ->label('Filename metadata')
-                                                    ->live()
-                                                    ->inline()
-                                                    ->multiple()
-                                                    ->columnSpanFull()
-                                                    ->options([
-                                                        'year' => 'Year',
-                                                        // 'resolution' => 'Resolution',
-                                                        // 'codec' => 'Codec',
-                                                        'tmdb_id' => 'TMDB ID',
-                                                    ])
-                                                    ->dehydrateStateUsing(function ($state, Set $set) {
-                                                        // Update the old boolean fields for backwards compatibility
-                                                        $state = $state ?? [];
-                                                        $set('vod_stream_file_sync_filename_year', in_array('year', $state));
-                                                        $set('vod_stream_file_sync_filename_resolution', in_array('resolution', $state));
-                                                        $set('vod_stream_file_sync_filename_codec', in_array('codec', $state));
-                                                        $set('vod_stream_file_sync_filename_tmdb_id', in_array('tmdb_id', $state));
-
-                                                        return $state;
-                                                    }),
-                                                Forms\Components\ToggleButtons::make('vod_stream_file_sync_tmdb_id_format')
-                                                    ->label('TMDB ID format')
-                                                    ->inline()
-                                                    ->grouped()
-                                                    ->live()
-                                                    ->options([
-                                                        'square' => '[square]',
-                                                        'curly' => '{curly}',
-                                                    ])->hidden(fn($get) => ! in_array('tmdb_id', $get('vod_stream_file_sync_filename_metadata') ?? [])),
-                                            ])
-                                            ->hidden(fn($get) => ! $get('vod_stream_file_sync_enabled')),
-                                        Fieldset::make('Filename Cleansing')
-                                            ->columnSpanFull()
-                                            ->schema([
-                                                Toggle::make('vod_stream_file_sync_clean_special_chars')
-                                                    ->label('Clean special characters')
-                                                    ->helperText('Remove or replace special characters in filenames')
-                                                    ->inline(false),
-                                                Toggle::make('vod_stream_file_sync_remove_consecutive_chars')
-                                                    ->label('Remove consecutive replacement characters')
-                                                    ->inline(false)
-                                                    ->live(),
-                                                Forms\Components\ToggleButtons::make('vod_stream_file_sync_replace_char')
-                                                    ->label('Replace with')
-                                                    ->inline()
-                                                    ->grouped()
-                                                    ->columnSpanFull()
-                                                    ->options([
-                                                        'space' => 'Space',
-                                                        'dash' => '-',
-                                                        'underscore' => '_',
-                                                        'period' => '.',
-                                                        'remove' => 'Remove',
-                                                    ]),
-                                            ])
-                                            ->hidden(fn($get) => ! $get('vod_stream_file_sync_enabled')),
-                                        Fieldset::make('Name Filtering')
-                                            ->columnSpanFull()
-                                            ->schema([
-                                                Toggle::make('vod_stream_file_sync_name_filter_enabled')
-                                                    ->label('Enable name filtering')
-                                                    ->helperText('Remove specific words or symbols from folder and file names (e.g. "DE • " from "DE • Action" → "Action")')
-                                                    ->inline(false)
-                                                    ->live(),
-                                                Forms\Components\TagsInput::make('vod_stream_file_sync_name_filter_patterns')
-                                                    ->label('Patterns to remove')
-                                                    ->placeholder('Add pattern (e.g. "DE • " or "EN |")')
-                                                    ->helperText('Enter words, symbols or prefixes to remove from group and file names. Press Enter after each pattern.')
-                                                    ->columnSpanFull()
-                                                    ->hidden(fn($get) => ! $get('vod_stream_file_sync_name_filter_enabled')),
-                                            ])
-                                            ->hidden(fn($get) => ! $get('vod_stream_file_sync_enabled')),
+                                    ]),
+                                Section::make('Placeholder Images')
+                                    ->description('Override app-wide placeholder images for logos, episode previews, and VOD/Series poster fallbacks.')
+                                    ->columns(3)
+                                    ->schema([
+                                        FileUpload::make('logo_placeholder_url')
+                                            ->label('Logo placeholder')
+                                            ->image()
+                                            ->disk('public')
+                                            ->directory('assets/placeholders')
+                                            ->visibility('public')
+                                            ->openable()
+                                            ->downloadable()
+                                            ->hintIcon(
+                                                'heroicon-m-question-mark-circle',
+                                                tooltip: 'Used when a channel logo is missing. Clear to use the default placeholder.'
+                                            )
+                                            ->helperText(new HtmlString('<strong>Recommended size:</strong> 300x300px for best results.<br/>Default image: <img src="'.url('/placeholder.png').'" alt="Default Logo Placeholder" style="width:80px; height:80px; margin-top:5px;">')),
+                                        FileUpload::make('episode_placeholder_url')
+                                            ->label('Episode preview placeholder')
+                                            ->image()
+                                            ->disk('public')
+                                            ->directory('assets/placeholders')
+                                            ->visibility('public')
+                                            ->openable()
+                                            ->downloadable()
+                                            ->hintIcon(
+                                                'heroicon-m-question-mark-circle',
+                                                tooltip: 'Used when an episode preview image is missing. Clear to use the default placeholder.'
+                                            )
+                                            ->helperText(new HtmlString('<strong>Recommended size:</strong> 600x400px for best results.<br/>Default image: <img src="'.url('/episode-placeholder.png').'" alt="Default Episode Placeholder" style="width:120px; height:80px; margin-top:5px;">')),
+                                        FileUpload::make('vod_series_poster_placeholder_url')
+                                            ->label('VOD/Series poster placeholder')
+                                            ->image()
+                                            ->disk('public')
+                                            ->directory('assets/placeholders')
+                                            ->visibility('public')
+                                            ->openable()
+                                            ->downloadable()
+                                            ->hintIcon(
+                                                'heroicon-m-question-mark-circle',
+                                                tooltip: 'Used when VOD/Series poster or cover images are missing. Clear to use the default placeholder.'
+                                            )
+                                            ->helperText(new HtmlString('<strong>Recommended size:</strong> 600x900px for best results.<br/>Default image: <img src="'.url('/vod-series-poster-placeholder.png').'" alt="Default VOD/Series Poster Placeholder" style="width:80px; height:120px; margin-top:5px;">')),
                                     ]),
                             ]),
 
@@ -946,15 +884,15 @@ class Preferences extends SettingsPage
                                                             ->url('https://crontab.guru')
                                                             ->openUrlInNewTab(true)
                                                     )
-                                                    ->helperText(fn($get) => CronExpression::isValidExpression($get('auto_backup_database_schedule'))
-                                                        ? 'Next scheduled backup: ' . (new CronExpression($get('auto_backup_database_schedule')))->getNextRunDate()->format('Y-m-d H:i:s')
+                                                    ->helperText(fn ($get) => CronExpression::isValidExpression($get('auto_backup_database_schedule'))
+                                                        ? 'Next scheduled backup: '.(new CronExpression($get('auto_backup_database_schedule')))->getNextRunDate()->format('Y-m-d H:i:s')
                                                         : 'Specify the CRON schedule for automatic backups, e.g. "0 3 * * *".'),
                                                 TextInput::make('auto_backup_database_max_backups')
                                                     ->label('Max Backups')
                                                     ->type('number')
                                                     ->minValue(0)
                                                     ->helperText('Specify the maximum number of backups to keep. Enter 0 for no limit.'),
-                                            ])->hidden(fn($get) => ! $get('auto_backup_database')),
+                                            ])->hidden(fn ($get) => ! $get('auto_backup_database')),
                                     ]),
                             ]),
 
@@ -1015,7 +953,7 @@ class Preferences extends SettingsPage
                                                     Notification::make()
                                                         ->success()
                                                         ->title('Test Email Sent')
-                                                        ->body('Test email sent successfully to ' . $data['to_email'])
+                                                        ->body('Test email sent successfully to '.$data['to_email'])
                                                         ->send();
                                                 } catch (Exception $e) {
                                                     Notification::make()
@@ -1087,6 +1025,7 @@ class Preferences extends SettingsPage
                                                         ->title('API Key Required')
                                                         ->body('Please enter a TMDB API key to test the connection.')
                                                         ->send();
+
                                                     return;
                                                 }
 
@@ -1113,7 +1052,7 @@ class Preferences extends SettingsPage
                                                     Notification::make()
                                                         ->danger()
                                                         ->title('Connection Failed')
-                                                        ->body('Could not connect to TMDB API: ' . $e->getMessage())
+                                                        ->body('Could not connect to TMDB API: '.$e->getMessage())
                                                         ->send();
                                                 }
                                             }),
@@ -1134,8 +1073,8 @@ class Preferences extends SettingsPage
                                             ->columnSpanFull()
                                             ->helperText('Your TMDB API key (v3 auth). You can get one for free at themoviedb.org.'),
                                         Toggle::make('tmdb_auto_lookup_on_import')
-                                            ->label('Auto-lookup on import')
-                                            ->helperText('Automatically lookup TMDB IDs when importing VOD content and Series. This may slow down imports for large playlists.')
+                                            ->label('Auto-lookup on metadata fetch')
+                                            ->helperText('Automatically lookup TMDB IDs when fetching metadata for VOD and Series. This may slow down imports and metadata fetching for large playlists. Will only be fetched for enabled items.')
                                             ->default(false),
                                         TextInput::make('tmdb_rate_limit')
                                             ->label('Rate Limit (requests/second)')

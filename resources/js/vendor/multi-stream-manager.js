@@ -26,12 +26,12 @@ function multiStreamManager() {
             if (this._initialized) {
                 return;
             }
-            
+
             // Check if we already have a listener
             if (window._floatingStreamListenerAdded) {
                 return;
             }
-            
+
             // Listen for new stream requests
             window.addEventListener('openFloatingStream', (event) => {
                 let detail = event.detail;
@@ -42,19 +42,36 @@ function multiStreamManager() {
                 event.stopPropagation(); // Prevent event bubbling
                 this.openStream(detail);
             });
-            
+
             // Mark that we've added the listener
             window._floatingStreamListenerAdded = true;
 
-            // Cleanup on page unload
+            // Cleanup on page unload (beforeunload + pagehide for mobile Safari)
             window.addEventListener('beforeunload', () => {
                 this.cleanupAllStreams();
+            });
+            window.addEventListener('pagehide', () => {
+                this.cleanupAllStreams();
+            });
+
+            // Cleanup on Livewire SPA navigation
+            window.addEventListener('livewire:navigating', () => {
+                this.cleanupAllStreams();
+            });
+
+            // Pause/resume streams on tab visibility change (saves bandwidth on mobile)
+            document.addEventListener('visibilitychange', () => {
+                if (document.visibilityState === 'hidden') {
+                    this.pauseAllStreams();
+                } else if (document.visibilityState === 'visible') {
+                    this.resumeAllStreams();
+                }
             });
 
             // Global mouse events for drag and resize
             document.addEventListener('mousemove', (e) => this.handleMouseMove(e));
             document.addEventListener('mouseup', () => this.handleMouseUp());
-            
+
             // Mark as initialized
             this._initialized = true;
         },
@@ -66,11 +83,13 @@ function multiStreamManager() {
                 this.bringToFront(existingPlayer.id);
                 return;
             }
-            
+
             const playerId = 'floating-player-' + Date.now() + '-' + Math.random().toString(36).substr(2, 9);
-            
+
             const player = {
                 id: playerId,
+                channelId: channelData.id || null,
+                channelType: channelData.type || null,
                 title: channelData.title || channelData.name || 'Unknown Channel',
                 logo: channelData.logo || channelData.icon || '',
                 url: channelData.url || '',
@@ -89,7 +108,7 @@ function multiStreamManager() {
             const maxX = window.innerWidth - 500; // Account for player width
             const maxY = window.innerHeight - 300; // Account for player height
             const padding = 50;
-            
+
             return {
                 x: Math.max(padding, Math.random() * maxX),
                 y: Math.max(padding, Math.random() * maxY)
@@ -108,18 +127,21 @@ function multiStreamManager() {
             const playerIndex = this.players.findIndex(p => p.id === playerId);
             if (playerIndex !== -1) {
                 const player = this.players[playerIndex];
-                
+
+                // Notify server to stop the proxy stream (best-effort via sendBeacon)
+                this.notifyServerStreamStop(player);
+
                 // Cleanup stream player via video element
                 const videoElement = document.getElementById(player.id + '-video');
                 if (videoElement && videoElement._streamPlayer) {
                     videoElement._streamPlayer.cleanup();
                 }
-                
+
                 // Also cleanup via stored reference
                 if (player.streamPlayer && typeof player.streamPlayer.cleanup === 'function') {
                     player.streamPlayer.cleanup();
                 }
-                
+
                 // Remove from array
                 this.players.splice(playerIndex, 1);
             }
@@ -127,6 +149,8 @@ function multiStreamManager() {
 
         cleanupAllStreams() {
             this.players.forEach(player => {
+                // Notify server to stop the proxy stream (best-effort via sendBeacon)
+                this.notifyServerStreamStop(player);
                 // Cleanup via video element
                 const videoElement = document.getElementById(player.id + '-video');
                 if (videoElement && videoElement._streamPlayer) {
@@ -136,7 +160,7 @@ function multiStreamManager() {
                         console.warn('Error cleaning up video element:', e);
                     }
                 }
-                
+
                 // Also cleanup via stored reference
                 if (player.streamPlayer && typeof player.streamPlayer.cleanup === 'function') {
                     try {
@@ -147,9 +171,54 @@ function multiStreamManager() {
                 }
             });
             this.players = [];
-            
+
             // Reset initialization flag
             this._initialized = false;
+        },
+
+        pauseAllStreams() {
+            this.players.forEach(player => {
+                const videoElement = document.getElementById(player.id + '-video');
+                if (videoElement && !videoElement.paused) {
+                    videoElement.pause();
+                    player._wasPausedByVisibility = true;
+                }
+            });
+        },
+
+        resumeAllStreams() {
+            this.players.forEach(player => {
+                if (player._wasPausedByVisibility) {
+                    const videoElement = document.getElementById(player.id + '-video');
+                    if (videoElement) {
+                        videoElement.play().catch(() => {
+                            // Autoplay may be blocked; user can manually resume
+                        });
+                    }
+                    player._wasPausedByVisibility = false;
+                }
+            });
+        },
+
+        /**
+         * Notify the server to stop the proxy stream for this player.
+         * Uses sendBeacon for reliability during page unload.
+         */
+        notifyServerStreamStop(player) {
+            if (!player.channelId || !player.channelType) {
+                return;
+            }
+            try {
+                const url = '/api/m3u-proxy/player-stream/stop';
+                const data = new Blob(
+                    [JSON.stringify({ id: player.channelId, type: player.channelType })],
+                    { type: 'application/json' }
+                );
+                navigator.sendBeacon(url, data);
+            } catch (e) {
+                // Best-effort: proxy will detect TCP drop as fallback
+                console.warn('Failed to notify server of stream stop:', e);
+            }
         },
 
         bringToFront(playerId) {
@@ -166,11 +235,29 @@ function multiStreamManager() {
             }
         },
 
+        openInNewTab(player, popoutRoute) {
+            if (!player || !player.url || !popoutRoute) {
+                return;
+            }
+
+            // Close the current floating player
+            this.closeStream(player.id);
+
+            const params = new URLSearchParams({
+                title: player.title ?? '',
+                logo: player.logo ?? '',
+                url: player.url ?? '',
+                format: player.format ?? 'ts',
+            });
+
+            window.open(popoutRoute + '?' + params.toString(), '_blank', 'noopener');
+        },
+
         // Drag functionality
         startDrag(playerId, event) {
             event.preventDefault();
             this.bringToFront(playerId);
-            
+
             const player = this.players.find(p => p.id === playerId);
             if (!player) return;
 
@@ -189,7 +276,7 @@ function multiStreamManager() {
             event.preventDefault();
             event.stopPropagation();
             this.bringToFront(playerId);
-            
+
             const player = this.players.find(p => p.id === playerId);
             if (!player) return;
 
@@ -209,7 +296,7 @@ function multiStreamManager() {
                 if (player) {
                     const deltaX = event.clientX - this.dragState.startX;
                     const deltaY = event.clientY - this.dragState.startY;
-                    
+
                     player.position.x = Math.max(0, Math.min(
                         window.innerWidth - player.size.width,
                         this.dragState.startLeft + deltaX
@@ -226,10 +313,10 @@ function multiStreamManager() {
                 if (player) {
                     const deltaX = event.clientX - this.resizeState.startX;
                     const deltaY = event.clientY - this.resizeState.startY;
-                    
+
                     const newWidth = Math.max(320, this.resizeState.startWidth + deltaX);
                     const newHeight = Math.max(180, this.resizeState.startHeight + deltaY);
-                    
+
                     // Maintain 16:9 aspect ratio
                     const aspectRatio = 16 / 9;
                     if (Math.abs(deltaX) > Math.abs(deltaY)) {

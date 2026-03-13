@@ -3,22 +3,34 @@
 namespace App\Livewire;
 
 use App\Facades\PlaylistFacade;
-use Exception;
+use App\Jobs\RefreshPlaylistProfiles;
+use App\Models\CustomPlaylist;
+use App\Models\MergedPlaylist;
 use App\Models\Playlist;
-use App\Models\SharedStream;
+use App\Models\PlaylistAlias;
 use App\Services\M3uProxyService;
-use App\Services\XtreamService;
+use App\Services\ProfileService;
 use Carbon\Carbon;
-use Livewire\Component;
 use Illuminate\Database\Eloquent\Model;
-use Illuminate\Support\Facades\Cache;
-use Illuminate\Support\Facades\Log;
-use Illuminate\Support\Facades\Redis;
+use Livewire\Component;
 
 class PlaylistInfo extends Component
 {
     public Model $record;
+
     public bool $isVisible = true;
+
+    /**
+     * Mount the component and dispatch background refresh for provider info.
+     * PERFORMANCE FIX: Refresh provider info asynchronously to avoid blocking page load.
+     */
+    public function mount(): void
+    {
+        // Dispatch background job to refresh provider info if profiles are enabled
+        if ($this->record instanceof Playlist && $this->record->profiles_enabled) {
+            RefreshPlaylistProfiles::dispatch($this->record->id);
+        }
+    }
 
     public function render()
     {
@@ -27,14 +39,45 @@ class PlaylistInfo extends Component
 
     public function toggleVisibility()
     {
-        $this->isVisible = !$this->isVisible;
+        $this->isVisible = ! $this->isVisible;
     }
 
     public function getStats(): array
     {
         $playlist = PlaylistFacade::resolvePlaylistByUuid($this->record->uuid);
-        if (!$playlist) {
+        if (! $playlist) {
             return [];
+        }
+
+        // Network playlists show network info instead of channels
+        if ($playlist->is_network_playlist) {
+            $networks = $playlist->networks()->with('mediaServerIntegration')->get();
+
+            // Check if the broadcast service is enabled (from config)
+            $broadcastServiceEnabled = (bool) config('app.network_broadcast_enabled', false);
+
+            // Count totals for display in Playlist view tiles
+            $totalNetworks = $networks->count();
+            $broadcastingCount = $networks->filter(fn ($n) => $n->isBroadcasting())->count();
+
+            return [
+                'is_network_playlist' => true,
+                'broadcast_service_enabled' => $broadcastServiceEnabled,
+                'network_count' => $totalNetworks,
+
+                // For the channel tiles: show total networks as "Live" and the number broadcasting as "Enabled"
+                'channel_count' => $totalNetworks,
+                'enabled_channel_count' => $broadcastingCount,
+
+                'networks' => $networks->map(fn ($n) => [
+                    'id' => $n->id,
+                    'name' => $n->name,
+                    'channel_number' => $n->channel_number,
+                    'broadcast_enabled' => $n->broadcast_enabled,
+                    'is_broadcasting' => $n->isBroadcasting(),
+                    'media_server' => $n->mediaServerIntegration?->name,
+                ])->toArray(),
+            ];
         }
 
         $stats = [
@@ -51,10 +94,27 @@ class PlaylistInfo extends Component
             // 'last_synced' => $playlist->synced ? Carbon::parse($playlist->synced)->diffForHumans() : 'Never',
         ];
         if ($playlist->enable_proxy) {
-            $activeStreams = M3uProxyService::getPlaylistActiveStreamsCount($playlist);
-            $availableStreams = $playlist->available_streams ?? 0;
+            // Determine if this playlist (or its sources) use provider profiles.
+            // For CustomPlaylist/MergedPlaylist, check if source playlists have profiles enabled.
+            $profileSourcePlaylists = $this->resolveProfileSourcePlaylists($playlist);
+            $hasProfiles = $profileSourcePlaylists->isNotEmpty();
+
+            if ($hasProfiles) {
+                // Use actual proxy count for active streams and aggregate profile capacity
+                $activeStreams = M3uProxyService::getPlaylistActiveStreamsCount($playlist);
+                $availableStreams = 0;
+                foreach ($profileSourcePlaylists as $sourcePlaylist) {
+                    $poolStatus = ProfileService::getPoolStatus($sourcePlaylist);
+                    $availableStreams += $poolStatus['total_capacity'];
+                }
+            } else {
+                // Use m3u-proxy active streams count and playlist-level limit
+                $activeStreams = M3uProxyService::getPlaylistActiveStreamsCount($playlist);
+                $availableStreams = $playlist->available_streams ?? 0;
+            }
+
             if ($availableStreams === 0) {
-                $availableStreams = "∞";
+                $availableStreams = '∞';
             }
             $stats['active_streams'] = $activeStreams;
             $stats['available_streams'] = $availableStreams;
@@ -63,7 +123,7 @@ class PlaylistInfo extends Component
         }
         if ($playlist->xtream) {
             $xtreamStats = $this->getXtreamStats($playlist);
-            if (!empty($xtreamStats)) {
+            if (! empty($xtreamStats)) {
                 $stats = array_merge($stats, $xtreamStats);
             }
         }
@@ -73,6 +133,12 @@ class PlaylistInfo extends Component
 
     private function getXtreamStats(Playlist $playlist): array
     {
+        // Check if this playlist directly uses provider profiles
+        if ($playlist->profiles_enabled) {
+            return $this->getProfiledXtreamStats($playlist);
+        }
+
+        // Standard single-account stats
         $xtreamInfo = $playlist->xtream_status;
 
         $maxConnections = $xtreamInfo['user_info']['max_connections'] ?? 1;
@@ -83,6 +149,7 @@ class PlaylistInfo extends Component
             $expires = Carbon::createFromTimestamp($expires);
             $expiresIn24HoursOrLess = $expires->isToday() || $expires->isTomorrow();
         }
+
         return [
             'xtream_info' => [
                 'active_connections' => "$activeConnections/$maxConnections",
@@ -90,7 +157,90 @@ class PlaylistInfo extends Component
                 'expires' => $expires ? $expires->diffForHumans() : 'N/A',
                 'expires_description' => $expires ? $expires->toDateTimeString() : 'N/A',
                 'expires_in_24_hours_or_less' => $expiresIn24HoursOrLess,
-            ]
+            ],
+        ];
+    }
+
+    /**
+     * Resolve source playlists that have provider profiles enabled.
+     *
+     * For a Playlist with profiles_enabled, returns a collection containing just that playlist.
+     * For a CustomPlaylist, returns source playlists with profiles_enabled via getPooledSourcePlaylists().
+     * For a MergedPlaylist, returns source playlists with profiles_enabled via the playlists() relation.
+     * For a PlaylistAlias, delegates to the effective playlist (Playlist or CustomPlaylist).
+     * For other playlist types, returns an empty collection.
+     */
+    private function resolveProfileSourcePlaylists(Model $playlist): \Illuminate\Support\Collection
+    {
+        if ($playlist instanceof Playlist && $playlist->profiles_enabled) {
+            return collect([$playlist]);
+        }
+
+        if ($playlist instanceof CustomPlaylist && $playlist->hasPooledSourcePlaylists()) {
+            return $playlist->getPooledSourcePlaylists();
+        }
+
+        if ($playlist instanceof MergedPlaylist) {
+            return $playlist->playlists()
+                ->where('profiles_enabled', true)
+                ->get();
+        }
+
+        if ($playlist instanceof PlaylistAlias) {
+            $effective = $playlist->getEffectivePlaylist();
+            if ($effective) {
+                return $this->resolveProfileSourcePlaylists($effective);
+            }
+        }
+
+        return collect();
+    }
+
+    /**
+     * Get Xtream stats for a playlist with provider profiles enabled.
+     * Uses actual proxy count for active connections to avoid stale Redis counts.
+     */
+    private function getProfiledXtreamStats(Playlist $playlist): array
+    {
+        $poolStatus = ProfileService::getPoolStatus($playlist);
+        $maxConnections = $poolStatus['total_capacity'];
+        $activeConnections = M3uProxyService::getPlaylistActiveStreamsCount($playlist);
+
+        // Get earliest expiration from any profile
+        $expires = null;
+        $expiresIn24HoursOrLess = false;
+        foreach ($poolStatus['profiles'] as $profile) {
+            if (isset($profile['exp_date']) && $profile['exp_date']) {
+                $profileExpires = Carbon::parse($profile['exp_date']);
+                if ($expires === null || $profileExpires->lt($expires)) {
+                    $expires = $profileExpires;
+                }
+            }
+        }
+
+        // If no profile expiration found, fall back to primary xtream_status
+        if ($expires === null) {
+            $xtreamInfo = $playlist->xtream_status;
+            $expTimestamp = $xtreamInfo['user_info']['exp_date'] ?? null;
+            if ($expTimestamp) {
+                $expires = Carbon::createFromTimestamp($expTimestamp);
+            }
+        }
+
+        if ($expires) {
+            $expiresIn24HoursOrLess = $expires->isToday() || $expires->isTomorrow();
+        }
+
+        return [
+            'xtream_info' => [
+                'active_connections' => "$activeConnections/$maxConnections",
+                'max_streams_reached' => $maxConnections > 0 && $activeConnections >= $maxConnections,
+                'expires' => $expires ? $expires->diffForHumans() : 'N/A',
+                'expires_description' => $expires ? $expires->toDateTimeString() : 'N/A',
+                'expires_in_24_hours_or_less' => $expiresIn24HoursOrLess,
+                'profiles_enabled' => true,
+                'profile_count' => count($poolStatus['profiles']),
+            ],
         ];
     }
 }

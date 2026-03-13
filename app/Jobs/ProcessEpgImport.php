@@ -3,29 +3,31 @@
 namespace App\Jobs;
 
 use App\Enums\EpgSourceType;
-use App\Traits\ProviderRequestDelay;
-use Exception;
-use XMLReader;
-use Throwable;
 use App\Enums\Status;
 use App\Events\SyncCompleted;
 use App\Models\Epg;
+use App\Models\EpgChannel;
 use App\Models\Job;
 use App\Services\SchedulesDirectService;
+use App\Traits\ProviderRequestDelay;
 use Carbon\Carbon;
+use Exception;
 use Filament\Notifications\Notification;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Queue\Queueable;
-use Illuminate\Support\Str;
 use Illuminate\Support\Facades\Bus;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\LazyCollection;
+use Illuminate\Support\Str;
+use Throwable;
+use XMLReader;
+use XMLWriter;
 
 class ProcessEpgImport implements ShouldQueue
 {
-    use Queueable;
     use ProviderRequestDelay;
+    use Queueable;
 
     // To prevent errors when processing large files, limit imported channels to 50,000
     // NOTE: this only applies to M3U+ files
@@ -47,9 +49,6 @@ class ProcessEpgImport implements ShouldQueue
 
     /**
      * Sanitize UTF-8 string to remove invalid sequences
-     *
-     * @param string|null $value
-     * @return string|null
      */
     private function sanitizeUtf8(?string $value): ?string
     {
@@ -68,8 +67,6 @@ class ProcessEpgImport implements ShouldQueue
 
     /**
      * Create a new job instance.
-     * 
-     * @param Epg $epg
      */
     public function __construct(
         public Epg $epg,
@@ -81,14 +78,14 @@ class ProcessEpgImport implements ShouldQueue
      */
     public function handle(SchedulesDirectService $service): void
     {
-        if (!$this->force) {
+        if (! $this->force) {
             // Don't update if currently processing
             if ($this->epg->processing) {
                 return;
             }
 
             // Check if auto sync is enabled, or the EPG hasn't been synced yet
-            if (!$this->epg->auto_sync && $this->epg->synced) {
+            if (! $this->epg->auto_sync && $this->epg->synced) {
                 return;
             }
         }
@@ -114,15 +111,21 @@ class ProcessEpgImport implements ShouldQueue
             $userId = $epg->user_id;
             $batchNo = Str::uuid7()->toString();
 
+            if ($epg->isMerged()) {
+                $this->processMergedEpg($epg, $start);
+
+                return;
+            }
+
             $channelReader = null;
             $filePath = null;
             if ($epg->source_type === EpgSourceType::SCHEDULES_DIRECT) {
-                if (!$epg->hasSchedulesDirectCredentials()) {
+                if (! $epg->hasSchedulesDirectCredentials()) {
                     // Log the exception
                     logger()->error("Error processing EPG \"{$this->epg->name}\"");
 
                     // Send notification
-                    $error = "Invalid Schedules Direct credentials. Unable to get results from the API. Please check the credentials and try again.";
+                    $error = 'Invalid SchedulesDirect credentials. Unable to get results from the API. Please check the credentials and try again.';
                     Notification::make()
                         ->danger()
                         ->title("Error processing EPG \"{$this->epg->name}\"")
@@ -147,19 +150,20 @@ class ProcessEpgImport implements ShouldQueue
 
                     // Fire the epg synced event
                     event(new SyncCompleted($this->epg));
+
                     return;
                 } else {
-                    // Sync the EPG data from Schedules Direct
+                    // Sync the EPG data from SchedulesDirect
                     // Notify user we're starting the sync...
                     Notification::make()
                         ->info()
-                        ->title('Starting Schedules Direct Data Sync')
-                        ->body("Schedules Direct Data Sync started for EPG \"{$epg->name}\".")
+                        ->title('Starting SchedulesDirect Data Sync')
+                        ->body("SchedulesDirect Data Sync started for EPG \"{$epg->name}\".")
                         ->broadcast($epg->user)
                         ->sendToDatabase($epg->user);
 
                     $shouldSync = true;
-                    if (!$this->force) {
+                    if (! $this->force) {
                         // If not forcing, check last modified time
                         $lastModified = Storage::disk('local')->exists($epg->file_path)
                             ? Storage::disk('local')->lastModified($epg->file_path)
@@ -168,7 +172,7 @@ class ProcessEpgImport implements ShouldQueue
                         if ($lastModified) {
                             $lastModifiedTime = Carbon::createFromTimestamp($lastModified);
                             $lastModifiedTime->addMinutes(10); // Add 10 minutes to last modified time
-                            if (!$lastModifiedTime->isPast()) { // If modified within the last 10 minutes, skip
+                            if (! $lastModifiedTime->isPast()) { // If modified within the last 10 minutes, skip
                                 $shouldSync = false;
                             }
                         }
@@ -184,8 +188,8 @@ class ProcessEpgImport implements ShouldQueue
                     // Notify user of success
                     Notification::make()
                         ->success()
-                        ->title('Schedules Direct Data Synced')
-                        ->body("Schedules Direct Data Synced successfully for EPG \"{$epg->name}\". Completed in {$completedInRounded} seconds. Now parsing data and generating EPG cache...")
+                        ->title('SchedulesDirect Data Synced')
+                        ->body("SchedulesDirect Data Synced successfully for EPG \"{$epg->name}\". Completed in {$completedInRounded} seconds. Now parsing data and generating EPG cache...")
                         ->broadcast($epg->user)
                         ->sendToDatabase($epg->user);
 
@@ -194,12 +198,12 @@ class ProcessEpgImport implements ShouldQueue
                         $filePath = Storage::disk('local')->path($epg->file_path);
                     }
                 }
-            } else if ($epg->url && str_starts_with($epg->url, 'http')) {
+            } elseif ($epg->url && str_starts_with($epg->url, 'http')) {
                 // Normalize the EPG url and get the filename
                 $url = str($epg->url)->replace(' ', '%20');
 
                 // We need to grab the file contents first and set to temp file
-                $verify = !$epg->disable_ssl_verification;
+                $verify = ! $epg->disable_ssl_verification;
                 $userAgent = empty($epg->user_agent) ? $this->userAgent : $epg->user_agent;
 
                 // Make sure the directory exists
@@ -226,9 +230,10 @@ class ProcessEpgImport implements ShouldQueue
                 }
             } else {
                 // Get uploaded file contents
-                if ($epg->uploads && Storage::disk('local')->exists($epg->uploads)) {
-                    $filePath = Storage::disk('local')->path($epg->uploads);
-                } else if ($epg->url) {
+                $uploadPath = is_array($epg->uploads) ? ($epg->uploads[0] ?? null) : $epg->uploads;
+                if ($uploadPath && Storage::disk('local')->exists($uploadPath)) {
+                    $filePath = Storage::disk('local')->path($uploadPath);
+                } elseif ($epg->url) {
                     $filePath = $epg->url;
                 }
             }
@@ -239,14 +244,14 @@ class ProcessEpgImport implements ShouldQueue
             // If we have XML data, let's process it
             if ($filePath) {
                 // Setup the XML readers
-                $channelReader = new XMLReader();
-                $channelReader->open('compress.zlib://' . $filePath);
+                $channelReader = new XMLReader;
+                $channelReader->open('compress.zlib://'.$filePath);
             } else {
                 // Log the exception
                 logger()->error("Error processing EPG \"{$this->epg->name}\"");
 
                 // Send notification
-                $error = "Invalid EPG file. Unable to read or download your EPG file. Please check the URL or uploaded file and try again.";
+                $error = 'Invalid EPG file. Unable to read or download your EPG file. Please check the URL or uploaded file and try again.';
                 Notification::make()
                     ->danger()
                     ->title("Error processing EPG \"{$this->epg->name}\"")
@@ -269,6 +274,7 @@ class ProcessEpgImport implements ShouldQueue
 
                 // Fire the epg synced event
                 event(new SyncCompleted($this->epg));
+
                 return;
             }
 
@@ -284,7 +290,7 @@ class ProcessEpgImport implements ShouldQueue
                     'epg_id' => $epgId,
                     'user_id' => $userId,
                     'import_batch_no' => $batchNo,
-                    'additional_display_names' => null
+                    'additional_display_names' => null,
                 ];
 
                 // Update progress
@@ -309,12 +315,12 @@ class ProcessEpgImport implements ShouldQueue
 
                             // Setup parser for inner nodes
                             $innerXML = $channelReader->readOuterXml();
-                            $innerReader = new XMLReader();
+                            $innerReader = new XMLReader;
                             $innerReader->xml($innerXML);
 
                             // Set the default data
                             $elementData = [
-                                ...$defaultChannelData
+                                ...$defaultChannelData,
                             ];
 
                             // Get the node data
@@ -326,7 +332,7 @@ class ProcessEpgImport implements ShouldQueue
                                             $elementData['channel_id'] = $this->sanitizeUtf8($channelId);
                                             break;
                                         case 'display-name':
-                                            if (!$elementData['display_name']) {
+                                            if (! $elementData['display_name']) {
                                                 // Only use the first display-name element (could be multiple)
                                                 $rawDisplayName = trim($innerReader->readString());
                                                 $elementData['name'] = $this->sanitizeUtf8(Str::limit($rawDisplayName, 255));
@@ -368,7 +374,7 @@ class ProcessEpgImport implements ShouldQueue
                         'payload' => $chunk->toArray(),
                         'variables' => [
                             'epgId' => $epg->id,
-                        ]
+                        ],
                     ]);
                 });
 
@@ -423,7 +429,7 @@ class ProcessEpgImport implements ShouldQueue
                 logger()->error("Error processing EPG \"{$this->epg->name}\"");
 
                 // Send notification
-                $error = "Invalid EPG file. Unable to read or download your EPG file. Please check the URL or uploaded file and try again.";
+                $error = 'Invalid EPG file. Unable to read or download your EPG file. Please check the URL or uploaded file and try again.';
                 Notification::make()
                     ->danger()
                     ->title("Error processing EPG \"{$this->epg->name}\"")
@@ -479,6 +485,174 @@ class ProcessEpgImport implements ShouldQueue
             // Fire the epg synced event
             event(new SyncCompleted($this->epg));
         }
-        return;
+
+    }
+
+    private function resolveEpgSourceFilePath(Epg $epg): ?string
+    {
+        if ($epg->isMerged() || $epg->source_type === EpgSourceType::SCHEDULES_DIRECT || ($epg->url && str_starts_with($epg->url, 'http'))) {
+            return Storage::disk('local')->exists($epg->file_path)
+                ? Storage::disk('local')->path($epg->file_path)
+                : null;
+        }
+
+        $uploadPath = is_array($epg->uploads) ? ($epg->uploads[0] ?? null) : $epg->uploads;
+        if ($uploadPath && Storage::disk('local')->exists($uploadPath)) {
+            return Storage::disk('local')->path($uploadPath);
+        }
+
+        if ($epg->url && file_exists($epg->url)) {
+            return $epg->url;
+        }
+
+        return null;
+    }
+
+    private function processMergedEpg(Epg $epg, Carbon $start): void
+    {
+        $merged = $this->buildMergedEpgFile($epg);
+
+        if (! $merged) {
+            $error = 'Invalid merged EPG configuration. Please ensure you selected at least 2 valid source EPGs and try again.';
+
+            Notification::make()
+                ->danger()
+                ->title("Error processing \"{$epg->name}\"")
+                ->body($error)
+                ->broadcast($epg->user);
+            Notification::make()
+                ->danger()
+                ->title("Error processing \"{$epg->name}\"")
+                ->body($error)
+                ->sendToDatabase($epg->user);
+
+            $epg->update([
+                'status' => Status::Failed,
+                'synced' => now(),
+                'errors' => $error,
+                'progress' => 100,
+                'processing' => false,
+                'processing_started_at' => null,
+                'processing_phase' => null,
+            ]);
+
+            event(new SyncCompleted($epg));
+
+            return;
+        }
+
+        EpgChannel::where('epg_id', $epg->id)->delete();
+
+        $completedIn = $start->diffInSeconds(now());
+        $completedInRounded = round($completedIn, 2);
+
+        $epg->update([
+            'status' => Status::Completed,
+            'synced' => now(),
+            'errors' => null,
+            'progress' => 100,
+            'processing' => false,
+            'processing_started_at' => null,
+            'processing_phase' => null,
+            'sync_time' => $completedIn,
+            'channel_count' => $merged['channel_count'],
+            'programme_count' => $merged['programme_count'],
+        ]);
+
+        Notification::make()
+            ->success()
+            ->title('EPG Synced')
+            ->body("\"{$epg->name}\" has been synced successfully. Import completed in {$completedInRounded} seconds.")
+            ->broadcast($epg->user)
+            ->sendToDatabase($epg->user);
+
+        event(new SyncCompleted($epg));
+    }
+
+    private function buildMergedEpgFile(Epg $epg): ?array
+    {
+        $sourceEpgs = $epg->sourceEpgs()
+            ->where('epgs.id', '!=', $epg->id)
+            ->where('epgs.is_merged', false)
+            ->orderBy('merged_epg_epg.sort_order')
+            ->get();
+
+        if ($sourceEpgs->isEmpty()) {
+            return null;
+        }
+
+        Storage::disk('local')->makeDirectory($epg->folder_path);
+
+        if (Storage::disk('local')->exists($epg->file_path)) {
+            Storage::disk('local')->delete($epg->file_path);
+        }
+
+        $mergedFilePath = Storage::disk('local')->path($epg->file_path);
+        $writer = new XMLWriter;
+        $writer->openURI($mergedFilePath);
+        $writer->startDocument('1.0', 'utf-8');
+        $writer->writeDTD('tv', null, 'xmltv.dtd');
+        $writer->startElement('tv');
+        $writer->writeAttribute('generator-info-name', 'Generated by m3u editor');
+        $writer->writeAttribute('generator-info-url', url(''));
+
+        $seenChannelIds = [];
+        $channelCount = 0;
+        $programmeCount = 0;
+
+        foreach ($sourceEpgs as $sourceEpg) {
+            $sourcePath = $this->resolveEpgSourceFilePath($sourceEpg);
+            if (! $sourcePath) {
+                continue;
+            }
+
+            $reader = new XMLReader;
+            if (! $reader->open('compress.zlib://'.$sourcePath)) {
+                continue;
+            }
+
+            while (@$reader->read()) {
+                if ($reader->nodeType !== XMLReader::ELEMENT) {
+                    continue;
+                }
+
+                if ($reader->name === 'channel') {
+                    $channelId = trim((string) $reader->getAttribute('id'));
+                    if ($channelId && array_key_exists($channelId, $seenChannelIds)) {
+                        $reader->readOuterXml();
+
+                        continue;
+                    }
+
+                    if ($channelId) {
+                        $seenChannelIds[$channelId] = true;
+                        $channelCount++;
+                    }
+
+                    $writer->writeRaw($reader->readOuterXml());
+
+                    continue;
+                }
+
+                if ($reader->name === 'programme') {
+                    $programmeCount++;
+                    $writer->writeRaw($reader->readOuterXml());
+                }
+            }
+
+            $reader->close();
+        }
+
+        $writer->endElement();
+        $writer->endDocument();
+        $writer->flush();
+
+        return file_exists($mergedFilePath)
+            ? [
+                'path' => $mergedFilePath,
+                'channel_count' => $channelCount,
+                'programme_count' => $programmeCount,
+            ]
+            : null;
     }
 }

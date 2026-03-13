@@ -11,12 +11,13 @@ use Filament\Notifications\Notification;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Queue\Queueable;
 use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Log;
 use JsonMachine\Items;
 
 class ProcessM3uImportSeriesChunk implements ShouldQueue
 {
-    use Queueable;
     use ProviderRequestDelay;
+    use Queueable;
 
     // Don't retry the job on failure
     public $tries = 1;
@@ -53,13 +54,13 @@ class ProcessM3uImportSeriesChunk implements ShouldQueue
         $sourceCategoryId = $payload['categoryId'] ?? null;
         $sourceCategoryName = $payload['categoryName'] ?? null;
 
-        if (!$sourceCategoryId || !$playlistId) {
+        if (! $sourceCategoryId || ! $playlistId) {
             return; // skip if no category or playlist
         }
 
         // Get the playlist
         $playlist = Playlist::find($playlistId);
-        if (!$playlist) {
+        if (! $playlist) {
             return; // skip if no playlist found
         }
 
@@ -85,14 +86,14 @@ class ProcessM3uImportSeriesChunk implements ShouldQueue
         }
 
         // Setup the user agent and SSL verification
-        $verify = !$playlist->disable_ssl_verification;
+        $verify = ! $playlist->disable_ssl_verification;
         $userAgent = empty($playlist->user_agent)
             ? $this->userAgent
             : $playlist->user_agent;
 
         // Get the Xtream config
         $xtreamConfig = $playlist->xtream_config;
-        if (!$xtreamConfig) {
+        if (! $xtreamConfig) {
             return; // skip if no Xtream config
         }
 
@@ -100,7 +101,7 @@ class ProcessM3uImportSeriesChunk implements ShouldQueue
         $baseUrl = $xtreamConfig['url'] ?? '';
         $user = $xtreamConfig['username'] ?? '';
         $password = $xtreamConfig['password'] ?? '';
-        if (!$baseUrl || !$user || !$password) {
+        if (! $baseUrl || ! $user || ! $password) {
             return; // skip if no base url or credentials
         }
 
@@ -110,7 +111,7 @@ class ProcessM3uImportSeriesChunk implements ShouldQueue
             ->withOptions(['verify' => $verify])
             ->timeout(60) // set timeout to 1 minute
             ->throw()->get($seriesStreamsUrl));
-        if (!$seriesStreamsResponse->ok()) {
+        if (! $seriesStreamsResponse->ok()) {
             return; // skip this category if there's an error
         }
 
@@ -122,7 +123,7 @@ class ProcessM3uImportSeriesChunk implements ShouldQueue
             'playlist_id' => $playlist->id,
             'source_category_id' => $sourceCategoryId,
         ])->first();
-        if (!$category) {
+        if (! $category) {
             $category = Category::create([
                 'name' => $sourceCategoryName,
                 'name_internal' => $sourceCategoryName,
@@ -134,6 +135,15 @@ class ProcessM3uImportSeriesChunk implements ShouldQueue
 
         // Create the streams
         foreach ($seriesStreams as $item) {
+            // Normalize and validate the name — some providers omit it which violates the DB NOT NULL constraint
+            $itemName = $item->name ?? $item->title ?? null;
+            $itemName = $itemName !== null ? trim((string) $itemName) : null;
+
+            // We need a name to proceed, if still not set, skip this item
+            if (empty($itemName)) {
+                continue;
+            }
+
             // Check if we already have this series in the playlist
             $existingSeries = $playlist->series()
                 ->where('source_series_id', $item->series_id)
@@ -148,7 +158,7 @@ class ProcessM3uImportSeriesChunk implements ShouldQueue
             // If we reach here, it means we need to create a new series
             $bulk[] = [
                 'enabled' => $this->autoEnable, // Disable the series by default
-                'name' => $item->name,
+                'name' => $itemName,
                 'source_series_id' => $item->series_id,
                 'source_category_id' => $sourceCategoryId,
                 'import_batch_no' => $this->batchNo,
@@ -174,7 +184,19 @@ class ProcessM3uImportSeriesChunk implements ShouldQueue
             'series_progress' => min(99, $playlist->series_progress + ($this->batchCount / 100) * 5),
         ]);
 
-        // Bulk insert the series in chunks
-        collect($bulk)->chunk(100)->each(fn($chunk) => Series::insert($chunk->toArray()));
+        // Bulk insert the series in chunks with logging on failure
+        collect($bulk)->chunk(100)->each(function ($chunk) {
+            try {
+                Series::insert($chunk->toArray());
+            } catch (\Throwable $e) {
+                Log::error('Series bulk insert failed', [
+                    'exception' => $e->getMessage(),
+                    'chunk' => $chunk->toArray(),
+                ]);
+
+                // Re-throw so the job fails loudly if needed
+                throw $e;
+            }
+        });
     }
 }

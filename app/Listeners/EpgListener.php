@@ -7,8 +7,6 @@ use App\Events\EpgDeleted;
 use App\Events\EpgUpdated;
 use App\Jobs\ProcessEpgImport;
 use App\Jobs\RunPostProcess;
-use Illuminate\Contracts\Queue\ShouldQueue;
-use Illuminate\Queue\InteractsWithQueue;
 
 class EpgListener
 {
@@ -29,6 +27,10 @@ class EpgListener
 
     private function handleEpgCreated(EpgCreated $event)
     {
+        if ($event->epg->isMerged() && ! $event->epg->sourceEpgs()->exists()) {
+            return;
+        }
+
         dispatch(new ProcessEpgImport($event->epg));
         $event->epg->postProcesses()->where([
             ['event', 'created'],

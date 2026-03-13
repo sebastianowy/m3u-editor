@@ -3,17 +3,20 @@
 namespace App\Models;
 
 use App\Enums\PlaylistSourceType;
+use App\Jobs\FetchTmdbIds;
 use App\Jobs\SyncSeriesStrmFiles;
 use App\Services\XtreamService;
+use App\Settings\GeneralSettings;
 use Filament\Notifications\Notification;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\BelongsToMany;
 use Illuminate\Database\Eloquent\Relations\HasMany;
+use Illuminate\Support\Facades\Bus;
 use Illuminate\Support\Facades\Log;
-use Spatie\Tags\HasTags;
 use Illuminate\Support\Str;
+use Spatie\Tags\HasTags;
 
 class Series extends Model
 {
@@ -33,13 +36,15 @@ class Series extends Model
         'user_id' => 'integer',
         'playlist_id' => 'integer',
         'category_id' => 'integer',
+        'tmdb_id' => 'integer',
+        'tvdb_id' => 'integer',
         // 'release_date' => 'date', // Not always well formed date, don't attempt to cast
         'rating_5based' => 'integer',
         'enabled' => 'boolean',
         'backdrop_path' => 'array',
         'metadata' => 'array',
         'sync_settings' => 'array',
-        'last_metadata_fetch' => 'datetime'
+        'last_metadata_fetch' => 'datetime',
     ];
 
     public function user(): BelongsTo
@@ -55,6 +60,11 @@ class Series extends Model
     public function category(): BelongsTo
     {
         return $this->belongsTo(Category::class);
+    }
+
+    public function streamFileSetting(): BelongsTo
+    {
+        return $this->belongsTo(StreamFileSetting::class);
     }
 
     public function customPlaylists(): BelongsToMany
@@ -77,26 +87,45 @@ class Series extends Model
         return $this->hasMany(Episode::class)->where('enabled', true);
     }
 
-    public function fetchMetadata($refresh = false, $sync = true)
+    /**
+     * Check if the series has TMDB/TVDB/IMDB metadata.
+     */
+    public function getHasMetadataAttribute(): bool
+    {
+        // Check if the series has TMDB, TVDB, or IMDB IDs
+        // Also check metadata array for backward compatibility
+        return ! empty($this->tmdb_id)
+            || ! empty($this->tvdb_id)
+            || ! empty($this->imdb_id)
+            || ! empty($this->metadata['tmdb_id'] ?? null)
+            || ! empty($this->metadata['tvdb_id'] ?? null)
+            || ! empty($this->metadata['imdb_id'] ?? null);
+    }
+
+    public function fetchMetadata($refresh = false, $sync = true, bool $dispatchTmdb = true)
     {
         try {
             $playlist = $this->playlist;
 
+            // Get settings instance
+            $settings = app(GeneralSettings::class);
+
             // For Xtream playlists, use XtreamService
-            if (!$playlist->xtream && $playlist->source_type !== PlaylistSourceType::Xtream) {
+            if (! $playlist->xtream && $playlist->source_type !== PlaylistSourceType::Xtream) {
                 // Not an Xtream playlist and not Emby, no metadata source available
                 return false;
             }
 
             $xtream = XtreamService::make($playlist);
 
-            if (!$xtream) {
+            if (! $xtream) {
                 Notification::make()
                     ->danger()
                     ->title('Series metadata sync failed')
                     ->body('Unable to connect to Xtream API provider to get series info, unable to fetch metadata.')
                     ->broadcast($playlist->user)
                     ->sendToDatabase($playlist->user);
+
                 return false;
             }
 
@@ -113,6 +142,7 @@ class Series extends Model
             if ($refresh) {
                 $item = $detail['info'] ?? null;
                 if ($item) {
+                    $backdropPath = $item['backdrop_path'] ?? [];
                     $update = array_merge($update, [
                         'name' => $item['name'],
                         'cover' => $item['cover'] ?? null,
@@ -123,7 +153,7 @@ class Series extends Model
                         'director' => $item['director'] ?? null,
                         'rating' => $item['rating'] ?? null,
                         'rating_5based' => (float) ($item['rating_5based'] ?? 0),
-                        'backdrop_path' => json_encode($item['backdrop_path'] ?? []),
+                        'backdrop_path' => is_string($backdropPath) ? json_decode($backdropPath, true) : $backdropPath,
                         'youtube_trailer' => $item['youtube_trailer'] ?? null,
                     ]);
                 }
@@ -143,13 +173,13 @@ class Series extends Model
                     // Get season info if available
                     $seasonInfo = $seasons[$season] ?? [];
 
-                    if (!$playlistSeason) {
+                    if (! $playlistSeason) {
                         // Create the season if it doesn't exist
                         $playlistSeason = $this->seasons()->create([
                             'season_number' => $season,
-                            'name' => $seasonInfo['name'] ?? "Season " . str_pad($season, 2, '0', STR_PAD_LEFT),
+                            'name' => $seasonInfo['name'] ?? 'Season '.str_pad($season, 2, '0', STR_PAD_LEFT),
                             'source_season_id' => $seasonInfo['id'] ?? null,
-                            'episode_count' => $seasonInfo['episode_count'] ?? 0,
+                            'episode_count' => (int) ($seasonInfo['episode_count'] ?? 0),
                             'cover' => $seasonInfo['cover'] ?? null,
                             'cover_big' => $seasonInfo['cover_big'] ?? null,
                             'user_id' => $playlist->user_id,
@@ -165,7 +195,7 @@ class Series extends Model
                             'new' => false,
                             'source_season_id' => $seasonInfo['id'] ?? null,
                             'category_id' => $playlistCategory->id,
-                            'episode_count' => $seasonInfo['episode_count'] ?? 0,
+                            'episode_count' => (int) ($seasonInfo['episode_count'] ?? 0),
                             'cover' => $seasonInfo['cover'] ?? null,
                             'cover_big' => $seasonInfo['cover_big'] ?? null,
                             'series_id' => $this->id,
@@ -180,7 +210,7 @@ class Series extends Model
                         $episodeCount++;
                         $url = $xtream->buildSeriesUrl($ep['id'], $ep['container_extension']);
                         $title = preg_match('/S\d{2}E\d{2} - (.*)/', $ep['title'], $m) ? $m[1] : null;
-                        if (!$title) {
+                        if (! $title) {
                             $title = $ep['title'] ?? "Episode {$ep['episode_num']}";
                         }
                         $bulk[] = [
@@ -215,7 +245,7 @@ class Series extends Model
                     // Upsert the episodes in bulk
                     Episode::upsert(
                         $bulk,
-                        uniqueBy: ['source_episode_id', 'playlist_id'],
+                        uniqueBy: ['source_episode_id', 'playlist_id', 'series_id'],
                         update: [
                             'title',
                             'import_batch_no',
@@ -225,7 +255,7 @@ class Series extends Model
                             'added',
                             'season',
                             'url',
-                            'info'
+                            'info',
                         ]
                     );
                 }
@@ -233,16 +263,30 @@ class Series extends Model
                 // Update last fetched timestamp for the series
                 $this->update($update);
 
+                $jobs = [];
+                if ($dispatchTmdb && $settings->tmdb_auto_lookup_on_import && $this->enabled) {
+                    // If TMDB auto lookup enabled, dispatch job to fetch TMDB metadata for episodes
+                    $jobs[] = new FetchTmdbIds(
+                        seriesIds: [$this->id],
+                        overwriteExisting: $refresh ?? false,
+                        sendCompletionNotification: false,
+                    );
+                }
                 if ($sync && $this->enabled) {
                     // Dispatch the job to sync .strm files
-                    dispatch(new SyncSeriesStrmFiles(series: $this, notify: false));
+                    $jobs[] = new SyncSeriesStrmFiles(series: $this, notify: false);
+                }
+
+                if (count($jobs) > 0) {
+                    Bus::chain($jobs)->dispatch()->afterCommit();
                 }
 
                 return $episodeCount;
             }
         } catch (\Exception $e) {
-            Log::error('Failed to fetch metadata for series ' . $this->id, ['exception' => $e]);
+            Log::error('Failed to fetch metadata for series '.$this->id, ['exception' => $e]);
         }
+
         return false;
     }
 
@@ -252,7 +296,7 @@ class Series extends Model
     public function getCustomCategoryName(string $customPlaylistUuid): string
     {
         $tag = $this->tags()
-            ->where('type', $customPlaylistUuid . '-category')
+            ->where('type', $customPlaylistUuid.'-category')
             ->first();
 
         return $tag ? $tag->getAttributeValue('name') : 'Uncategorized';

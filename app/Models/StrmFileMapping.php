@@ -13,14 +13,12 @@ class StrmFileMapping extends Model
 {
     use HasFactory;
 
-    protected $fillable = [
-        'syncable_type',
-        'syncable_id',
-        'sync_location',
-        'current_path',
-        'current_url',
-        'path_options',
-    ];
+    /** File extension constants */
+    public const STRM_EXTENSION = '.strm';
+
+    public const NFO_EXTENSION = '.nfo';
+
+    public const TVSHOW_NFO_FILENAME = 'tvshow.nfo';
 
     protected $casts = [
         'path_options' => 'array',
@@ -43,6 +41,99 @@ class StrmFileMapping extends Model
             ->where('syncable_id', $syncable->id)
             ->where('sync_location', $syncLocation)
             ->first();
+    }
+
+    /**
+     * Bulk load all mappings for a given syncable type and IDs.
+     * Returns a keyed collection: [syncable_id => StrmFileMapping]
+     *
+     * This dramatically improves performance when syncing many items
+     * by reducing N queries to 1 query.
+     *
+     * @param  string  $syncableType  The model class name (e.g., Episode::class)
+     * @param  array  $syncableIds  Array of syncable IDs to load
+     * @param  string  $syncLocation  Base sync location path
+     * @return \Illuminate\Support\Collection<int, self>
+     */
+    public static function bulkLoadForSyncables(
+        string $syncableType,
+        array $syncableIds,
+        string $syncLocation
+    ): \Illuminate\Support\Collection {
+        if (empty($syncableIds)) {
+            return collect();
+        }
+
+        return self::where('syncable_type', $syncableType)
+            ->whereIn('syncable_id', $syncableIds)
+            ->where('sync_location', $syncLocation)
+            ->get()
+            ->keyBy('syncable_id');
+    }
+
+    /**
+     * Sync the .strm file with a pre-loaded mapping cache.
+     * Use this when processing many items to avoid N+1 queries.
+     *
+     * @param  Model  $syncable  The model being synced (Channel, Episode, etc.)
+     * @param  string  $syncLocation  Base sync location path
+     * @param  string  $expectedPath  The expected full path for the .strm file
+     * @param  string  $url  The URL to store in the .strm file
+     * @param  array  $pathOptions  The options used to generate the path
+     * @param  \Illuminate\Support\Collection|null  $mappingCache  Pre-loaded mappings keyed by syncable_id
+     * @return self The mapping record
+     */
+    public static function syncFileWithCache(
+        Model $syncable,
+        string $syncLocation,
+        string $expectedPath,
+        string $url,
+        array $pathOptions = [],
+        ?\Illuminate\Support\Collection $mappingCache = null
+    ): self {
+        // Try to get mapping from cache first, fall back to DB query
+        $mapping = null;
+        if ($mappingCache !== null) {
+            $mapping = $mappingCache->get($syncable->id);
+        }
+
+        // If not in cache (or no cache provided), query the DB
+        if ($mapping === null && $mappingCache === null) {
+            $mapping = self::findForSyncable($syncable, $syncLocation);
+        }
+
+        // Case 1: No existing mapping - create new file
+        if (! $mapping) {
+            return self::createNewFile($syncable, $syncLocation, $expectedPath, $url, $pathOptions);
+        }
+
+        // Case 2: Path changed - rename the file
+        if ($mapping->current_path !== $expectedPath) {
+            return self::renameFile($mapping, $expectedPath, $url, $pathOptions);
+        }
+
+        // Case 3: URL changed - update the file content
+        if ($mapping->current_url !== $url) {
+            return self::updateFileUrl($mapping, $url, $pathOptions);
+        }
+
+        // Case 4: File missing from disk - recreate it
+        if (! @file_exists($mapping->current_path)) {
+            Log::info('STRM Sync: File missing from disk, recreating', ['path' => $mapping->current_path]);
+            $directory = dirname($mapping->current_path);
+            if (! is_dir($directory)) {
+                @mkdir($directory, 0755, true);
+            }
+            @file_put_contents($mapping->current_path, $url, LOCK_EX);
+        }
+
+        // Case 5: Nothing changed - ensure path_options stay in sync
+        if ($mapping->path_options != $pathOptions) {
+            $mapping->path_options = $pathOptions;
+            $mapping->save();
+        }
+
+        return $mapping;
     }
 
     /**
@@ -125,8 +216,6 @@ class StrmFileMapping extends Model
                 throw new RuntimeException("STRM Sync: Failed to write file: {$path}");
             }
 
-            Log::debug('STRM Sync: Created new file', ['path' => $path]);
-
             // Create and return the mapping
             return self::create([
                 'syncable_type' => get_class($syncable),
@@ -146,7 +235,12 @@ class StrmFileMapping extends Model
     }
 
     /**
-     * Rename an existing .strm file
+     * Rename an existing .strm file or directory
+     *
+     * Strategy:
+     * 1. If only the directory name changed (filename stays the same), rename the directory
+     *    This is more efficient and automatically moves all related files (NFO, etc.)
+     * 2. If the filename changed, rename/move the individual file and its NFO companion
      *
      * @throws RuntimeException If rename or file creation fails
      */
@@ -158,42 +252,56 @@ class StrmFileMapping extends Model
     ): self {
         $oldPath = $mapping->current_path;
         $oldDirectory = dirname($oldPath);
+        $newDirectory = dirname($newPath);
+        $oldFilename = basename($oldPath);
+        $newFilename = basename($newPath);
 
         try {
-            // Ensure new directory exists (0755 = owner full, others read+execute)
-            $newDirectory = dirname($newPath);
+            // Strategy 1: If only the directory changed (filename same), rename the directory
+            // This is more efficient and moves all files (STRM, NFO, etc.) automatically
+            if ($oldFilename === $newFilename && $oldDirectory !== $newDirectory) {
+                $directoryRenamed = self::tryRenameDirectory($oldDirectory, $newDirectory, $mapping->sync_location);
+
+                if ($directoryRenamed) {
+                    // Directory renamed successfully - update URL if changed
+                    if ($mapping->current_url !== $url) {
+                        $result = @file_put_contents($newPath, $url, LOCK_EX);
+                        if ($result === false) {
+                            Log::warning('STRM Sync: Failed to update URL after directory rename', ['path' => $newPath]);
+                        }
+                    }
+
+                    // Update the mapping
+                    $mapping->update([
+                        'current_path' => $newPath,
+                        'current_url' => $url,
+                        'path_options' => $pathOptions,
+                    ]);
+
+                    return $mapping;
+                }
+                // If directory rename failed, fall through to file-based approach
+            }
+
+            // Strategy 2: Rename/move individual files (filename changed or directory rename failed)
+            // Ensure new directory exists
             if (! is_dir($newDirectory)) {
                 if (! @mkdir($newDirectory, 0755, true)) {
                     throw new RuntimeException("STRM Sync: Failed to create directory: {$newDirectory}");
                 }
             }
 
-            // Try to rename/move the file with race condition handling
+            // Try to rename/move the STRM file with race condition handling
             $fileRenamed = false;
             if (@file_exists($oldPath)) {
-                try {
-                    // Try to rename the file
-                    if (@rename($oldPath, $newPath)) {
-                        $fileRenamed = true;
-                        Log::info('STRM Sync: Renamed file', ['from' => $oldPath, 'to' => $newPath]);
-                    } else {
-                        // Rename failed - try copy + delete as fallback (handles cross-device moves)
-                        if (@copy($oldPath, $newPath)) {
-                            $fileRenamed = true;
-                            // Copy succeeded, try to delete old file (non-critical if it fails)
-                            if (! @unlink($oldPath)) {
-                                Log::warning('STRM Sync: Failed to delete old file after copy', ['path' => $oldPath]);
-                            }
-                            Log::info('STRM Sync: Moved file (copy+delete)', ['from' => $oldPath, 'to' => $newPath]);
-                        }
-                    }
-                } catch (Throwable $e) {
-                    Log::warning('STRM Sync: Exception during file rename', [
-                        'from' => $oldPath,
-                        'to' => $newPath,
-                        'error' => $e->getMessage(),
-                    ]);
-                }
+                $fileRenamed = self::tryRenameOrCopyFile($oldPath, $newPath);
+            }
+
+            // Also move the NFO file if it exists (companion file)
+            $oldNfoPath = self::strmPathToNfoPath($oldPath);
+            $newNfoPath = self::strmPathToNfoPath($newPath);
+            if ($oldNfoPath !== $oldPath && @file_exists($oldNfoPath)) {
+                self::tryRenameOrCopyFile($oldNfoPath, $newNfoPath);
             }
 
             // If rename failed or old file didn't exist, create new file
@@ -229,6 +337,104 @@ class StrmFileMapping extends Model
                 'error' => $e->getMessage(),
             ]);
             throw $e;
+        }
+    }
+
+    /**
+     * Try to rename a directory, ensuring it's safe and within sync location
+     *
+     * @return bool True if directory was renamed successfully
+     */
+    protected static function tryRenameDirectory(string $oldDirectory, string $newDirectory, string $syncLocation): bool
+    {
+        // Safety check: ensure both directories are within sync location
+        $realSyncLocation = realpath(rtrim($syncLocation, '/'));
+        if ($realSyncLocation === false) {
+            return false;
+        }
+
+        // Check old directory exists and is within sync location
+        $realOldDirectory = realpath($oldDirectory);
+        if ($realOldDirectory === false || ! str_starts_with($realOldDirectory.'/', $realSyncLocation.'/')) {
+            return false;
+        }
+
+        // Ensure new directory's parent exists
+        $newParentDirectory = dirname($newDirectory);
+        if (! is_dir($newParentDirectory)) {
+            if (! @mkdir($newParentDirectory, 0755, true)) {
+                Log::warning('STRM Sync: Failed to create parent directory for rename', ['directory' => $newParentDirectory]);
+
+                return false;
+            }
+        }
+
+        // Check if new directory already exists (can't rename into existing directory)
+        if (is_dir($newDirectory)) {
+            Log::debug('STRM Sync: Target directory already exists, cannot rename', [
+                'from' => $oldDirectory,
+                'to' => $newDirectory,
+            ]);
+
+            return false;
+        }
+
+        try {
+            if (@rename($oldDirectory, $newDirectory)) {
+                Log::info('STRM Sync: Renamed directory', ['from' => $oldDirectory, 'to' => $newDirectory]);
+
+                return true;
+            }
+
+            Log::debug('STRM Sync: Directory rename failed', ['from' => $oldDirectory, 'to' => $newDirectory]);
+
+            return false;
+        } catch (Throwable $e) {
+            Log::warning('STRM Sync: Exception during directory rename', [
+                'from' => $oldDirectory,
+                'to' => $newDirectory,
+                'error' => $e->getMessage(),
+            ]);
+
+            return false;
+        }
+    }
+
+    /**
+     * Try to rename a file, falling back to copy+delete for cross-device moves
+     *
+     * @return bool True if file was renamed/moved successfully
+     */
+    protected static function tryRenameOrCopyFile(string $oldPath, string $newPath): bool
+    {
+        try {
+            // Try to rename the file
+            if (@rename($oldPath, $newPath)) {
+                Log::info('STRM Sync: Renamed file', ['from' => $oldPath, 'to' => $newPath]);
+
+                return true;
+            }
+
+            // Rename failed - try copy + delete as fallback (handles cross-device moves)
+            if (@copy($oldPath, $newPath)) {
+                // Copy succeeded, try to delete old file (non-critical if it fails)
+                if (! @unlink($oldPath)) {
+                    Log::warning('STRM Sync: Failed to delete old file after copy', ['path' => $oldPath]);
+                }
+                Log::info('STRM Sync: Moved file (copy+delete)', ['from' => $oldPath, 'to' => $newPath]);
+
+                return true;
+            }
+
+            return false;
+        } catch (Throwable $e) {
+            Log::warning('STRM Sync: Exception during file rename', [
+                'from' => $oldPath,
+                'to' => $newPath,
+                'error' => $e->getMessage(),
+            ]);
+
+            return false;
         }
     }
 
@@ -326,7 +532,7 @@ class StrmFileMapping extends Model
             }
 
             // Ensure directory is within sync location (prevent traversal)
-            if (! str_starts_with($realDirectory . '/', $realSyncLocation . '/')) {
+            if (! str_starts_with($realDirectory.'/', $realSyncLocation.'/')) {
                 Log::warning('STRM Sync: Directory cleanup blocked - path outside sync location', [
                     'directory' => $directory,
                     'sync_location' => $syncLocation,
@@ -398,12 +604,13 @@ class StrmFileMapping extends Model
             $path = $mapping->current_path;
 
             // Sanity check: ensure mapping path is within the requested sync location
-            if (! (str_starts_with($path, $root . '/') || $path === $root)) {
+            if (! (str_starts_with($path, $root.'/') || $path === $root)) {
                 Log::warning('STRM Sync: Skipping mapping outside sync location', [
                     'mapping_id' => $mapping->id,
                     'path' => $path,
                     'sync_location' => $root,
                 ]);
+
                 continue;
             }
 
@@ -412,6 +619,7 @@ class StrmFileMapping extends Model
             if (! is_dir($directory)) {
                 if (! @mkdir($directory, 0755, true)) {
                     Log::warning('STRM Sync: Failed to create directory while restoring', ['directory' => $directory]);
+
                     continue;
                 }
                 Log::debug('STRM Sync: Created directory during restore', ['directory' => $directory]);
@@ -431,6 +639,7 @@ class StrmFileMapping extends Model
             if ($shouldWrite) {
                 if (@file_put_contents($path, $mapping->current_url, LOCK_EX) === false) {
                     Log::warning('STRM Sync: Failed to write file during restore', ['path' => $path]);
+
                     continue;
                 }
                 Log::info('STRM Sync: Restored file from mapping', ['path' => $path]);
@@ -442,26 +651,209 @@ class StrmFileMapping extends Model
     }
 
     /**
-     * Delete all mappings and files for syncables that no longer exist or are disabled
+     * Delete all mappings and files for syncables that no longer exist or are disabled.
+     * Uses a single LEFT JOIN query instead of loading each syncable individually (N+1 prevention).
      */
     public static function cleanupOrphaned(string $syncableType, string $syncLocation): int
     {
+        // Normalize sync location
+        $syncLocation = rtrim($syncLocation, '/');
+
+        // Determine the table name from the syncable type
+        $modelInstance = new $syncableType;
+        $table = $modelInstance->getTable();
+
         $count = 0;
 
-        self::where('syncable_type', $syncableType)
-            ->where('sync_location', $syncLocation)
-            ->chunk(100, function ($mappings) use (&$count) {
-                foreach ($mappings as $mapping) {
-                    // Check if the syncable still exists and is enabled
-                    $syncable = $mapping->syncable;
-                    if (! $syncable || ! ($syncable->enabled ?? true)) {
-                        $mapping->deleteFile();
-                        $count++;
+        // Build base query to find orphaned mappings but only select minimal fields
+        $baseQuery = self::query()
+            ->where('strm_file_mappings.syncable_type', $syncableType)
+            ->where('strm_file_mappings.sync_location', $syncLocation)
+            ->leftJoin($table, function ($join) use ($table) {
+                $join->on('strm_file_mappings.syncable_id', '=', "{$table}.id");
+            })
+            ->where(function ($query) use ($table) {
+                $query->whereNull("{$table}.id")
+                    ->orWhere("{$table}.enabled", false);
+            })
+            ->select('strm_file_mappings.id', 'strm_file_mappings.current_path');
+
+        // Process in batches to reduce memory and DB overhead
+        $idsToDelete = [];
+        $pathsToUnlink = [];
+
+        $batchSize = 500;
+
+        // Ensure chunkById uses the fully-qualified column name to avoid ambiguous "id" when joined
+        // Pass both column (for WHERE clause) and alias (for accessing value from result)
+        $baseQuery->orderBy('strm_file_mappings.id')
+            ->chunkById($batchSize, function ($rows) use (&$idsToDelete, &$pathsToUnlink, &$count, $batchSize) {
+                foreach ($rows as $row) {
+                    $idsToDelete[] = $row->id;
+                    if (! empty($row->current_path)) {
+                        $pathsToUnlink[] = $row->current_path;
                     }
+                    $count++;
                 }
-            });
+
+                // When we have a reasonable batch, perform unlink and bulk delete to minimize per-row operations
+                if (count($idsToDelete) >= $batchSize) {
+                    // Unlink STRM files and corresponding NFO files (best-effort)
+                    foreach ($pathsToUnlink as $p) {
+                        try {
+                            @unlink($p);
+                            // Also delete the corresponding NFO file if it exists
+                            $nfoPath = self::strmPathToNfoPath($p);
+                            if ($nfoPath !== $p && file_exists($nfoPath)) {
+                                @unlink($nfoPath);
+                            }
+                        } catch (\Throwable $e) {
+                            Log::debug('STRM Sync: Failed to unlink orphaned file during bulk cleanup', ['path' => $p, 'error' => $e->getMessage()]);
+                        }
+                    }
+
+                    // Bulk delete DB rows
+                    try {
+                        self::whereIn('id', $idsToDelete)->delete();
+                    } catch (\Throwable $e) {
+                        Log::warning('STRM Sync: Bulk delete of orphaned mappings failed', ['error' => $e->getMessage()]);
+                    }
+
+                    // Reset accumulators
+                    $idsToDelete = [];
+                    $pathsToUnlink = [];
+                }
+            }, 'strm_file_mappings.id', 'id');
+
+        // Final flush of remaining ids/paths
+        if (! empty($pathsToUnlink)) {
+            foreach ($pathsToUnlink as $p) {
+                try {
+                    @unlink($p);
+                    // Also delete the corresponding NFO file if it exists
+                    $nfoPath = preg_replace('/\.strm$/i', '.nfo', $p);
+                    if ($nfoPath !== $p && file_exists($nfoPath)) {
+                        @unlink($nfoPath);
+                    }
+                } catch (\Throwable $e) {
+                    Log::debug('STRM Sync: Failed to unlink orphaned file during final bulk cleanup', ['path' => $p, 'error' => $e->getMessage()]);
+                }
+            }
+
+            try {
+                self::whereIn('id', $idsToDelete)->delete();
+            } catch (\Throwable $e) {
+                Log::warning('STRM Sync: Final bulk delete of orphaned mappings failed', ['error' => $e->getMessage()]);
+            }
+        }
 
         return $count;
+    }
+
+    /**
+     * Clean up all empty directories within a sync location.
+     * Uses depth-first traversal to remove empty directories from bottom up.
+     * Also removes orphaned tvshow.nfo files before checking if directory is empty.
+     */
+    public static function cleanupEmptyDirectoriesInLocation(string $syncLocation): void
+    {
+        $realSyncLocation = realpath(rtrim($syncLocation, '/'));
+        if ($realSyncLocation === false || ! is_dir($realSyncLocation)) {
+            return;
+        }
+
+        // Use RecursiveIteratorIterator to traverse directories depth-first (children before parents)
+        try {
+            $iterator = new \RecursiveIteratorIterator(
+                new \RecursiveDirectoryIterator($realSyncLocation, \RecursiveDirectoryIterator::SKIP_DOTS),
+                \RecursiveIteratorIterator::CHILD_FIRST
+            );
+
+            foreach ($iterator as $file) {
+                if ($file->isDir()) {
+                    $dirPath = $file->getRealPath();
+
+                    // Check if directory only contains tvshow.nfo (orphaned series folder)
+                    // If so, delete the tvshow.nfo first to allow directory cleanup
+                    $tvshowNfo = $dirPath.'/'.self::TVSHOW_NFO_FILENAME;
+                    if (file_exists($tvshowNfo) && self::isDirectoryOnlyContainsNfo($dirPath)) {
+                        @unlink($tvshowNfo);
+                        Log::debug('STRM Sync: Deleted orphaned tvshow.nfo', ['path' => $tvshowNfo]);
+                    }
+
+                    // Now check if directory is empty and remove it
+                    if (self::isDirectoryEmpty($dirPath)) {
+                        @rmdir($dirPath);
+                    }
+                }
+            }
+        } catch (Throwable $e) {
+            Log::debug('STRM Sync: Exception during bulk directory cleanup', [
+                'sync_location' => $syncLocation,
+                'error' => $e->getMessage(),
+            ]);
+        }
+    }
+
+    /**
+     * Check if a directory only contains NFO files (tvshow.nfo, etc.)
+     * Used to identify orphaned series folders that should be cleaned up.
+     */
+    protected static function isDirectoryOnlyContainsNfo(string $directory): bool
+    {
+        if (! is_dir($directory)) {
+            return false;
+        }
+
+        $handle = @opendir($directory);
+        if ($handle === false) {
+            return false;
+        }
+
+        try {
+            while (($entry = readdir($handle)) !== false) {
+                if ($entry !== '.' && $entry !== '..') {
+                    // If we find any file that's not an NFO, return false
+                    if (! str_ends_with(strtolower($entry), self::NFO_EXTENSION)) {
+                        return false;
+                    }
+                }
+            }
+
+            return true; // Directory only contains NFO files (or is empty)
+        } finally {
+            closedir($handle);
+        }
+    }
+
+    /**
+     * Convert a .strm file path to its corresponding .nfo path.
+     *
+     * Rules:
+     * - If a path ends with a slash or is a directory, return "<dir>/tvshow.nfo".
+     * - If a file path ends with ".strm" (case-insensitive), replace it with ".nfo".
+     * - If the path already ends with ".nfo", return it unchanged.
+     * - Otherwise append ".nfo" to the path.
+     */
+    public static function strmPathToNfoPath(string $path): string
+    {
+        // Directory path -> tvshow.nfo
+        if (str_ends_with($path, '/') || is_dir($path)) {
+            return rtrim($path, '/').'/'.self::TVSHOW_NFO_FILENAME;
+        }
+
+        // Already .nfo -> return as-is
+        if (preg_match('/\.nfo$/i', $path)) {
+            return $path;
+        }
+
+        // Replace .strm with .nfo (case-insensitive)
+        if (preg_match('/\.strm$/i', $path)) {
+            return preg_replace('/\.strm$/i', self::NFO_EXTENSION, $path);
+        }
+
+        // Fallback: append .nfo
+        return $path.self::NFO_EXTENSION;
     }
 
     /**

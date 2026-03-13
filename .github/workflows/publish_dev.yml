@@ -2,14 +2,75 @@ name: Dev
 on:
   push:
     branches: [dev]
+    paths:
+      - 'config/dev.php'
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-dev
+  cancel-in-progress: false
+
+env:
+  REGISTRY_IMAGE: ${{ secrets.DOCKERHUB_USERNAME }}/m3u-editor
 
 jobs:
-  push-amd64:
-    name: Publish dev m3u-editor Docker image (amd64)
+  # Run CI checks first
+  ci-check:
+    name: CI Validation
+    uses: ./.github/workflows/ci.yml
+    secrets: inherit
+
+  # Extract version from config/dev.php
+  get-version:
+    name: Get Version
     runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      proxy_commit: ${{ steps.proxy.outputs.commit }}
+      tag_exists: ${{ steps.version.outputs.tag_exists }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
+
+      - name: Extract dev version from config
+        id: version
+        run: |
+          VERSION=$(grep -oP "'dev_version'\s*=>\s*'\K[^']+" config/dev.php | sed 's/-dev$//')
+          if [ -z "$VERSION" ]; then
+            echo "::error::Could not extract dev_version from config/dev.php"
+            exit 1
+          fi
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "📦 Dev version: $VERSION"
+
+          if git ls-remote --tags origin "refs/tags/v${VERSION}-dev" | grep -q .; then
+            echo "tag_exists=true" >> $GITHUB_OUTPUT
+            echo "⚠️  Tag v${VERSION}-dev already exists — Docker build will be skipped"
+          else
+            echo "tag_exists=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Get m3u-proxy latest commit
+        id: proxy
+        run: |
+          PROXY_COMMIT=$(git ls-remote https://github.com/${{ github.repository_owner }}/m3u-proxy.git refs/heads/dev | cut -f1)
+          if [ -z "$PROXY_COMMIT" ]; then
+            echo "::warning::Could not fetch m3u-proxy commit, using timestamp for cache bust"
+            PROXY_COMMIT=$(date +%s)
+          fi
+          echo "commit=$PROXY_COMMIT" >> $GITHUB_OUTPUT
+          echo "📦 m3u-proxy commit: $PROXY_COMMIT"
+
+  push-amd64:
+    name: Build & Push (amd64)
+    runs-on: ubuntu-latest
+    needs: [ci-check, get-version]
+    if: needs.get-version.outputs.tag_exists != 'true'
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -21,27 +82,37 @@ jobs:
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Build and push amd64
-        uses: docker/build-push-action@v5
+        id: build
+        uses: docker/build-push-action@v6
         with:
           context: .
           platforms: linux/amd64
           push: true
-          tags: ${{ secrets.DOCKERHUB_USERNAME }}/m3u-editor:dev-amd64
+          tags: |
+            ${{ env.REGISTRY_IMAGE }}:dev-amd64
+            ${{ env.REGISTRY_IMAGE }}:dev-${{ needs.get-version.outputs.version }}-amd64
           build-args: |
             GIT_BRANCH=${{ github.ref_name }}
             GIT_COMMIT=${{ github.sha }}
             GIT_TAG=${{ github.ref_type == 'tag' && github.ref_name || '' }}
             M3U_PROXY_REPO=https://github.com/${{ github.repository_owner }}/m3u-proxy.git
             M3U_PROXY_BRANCH=dev
+            M3U_PROXY_COMMIT=${{ needs.get-version.outputs.proxy_commit }}
+          cache-from: type=gha,scope=dev-amd64
+          cache-to: type=gha,mode=max,scope=dev-amd64
           provenance: false
           sbom: false
 
   push-arm64:
-    name: Publish dev m3u-editor Docker image (arm64)
+    name: Build & Push (arm64)
     runs-on: ubuntu-22.04-arm
+    needs: [ci-check, get-version]
+    if: needs.get-version.outputs.tag_exists != 'true'
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -53,32 +124,33 @@ jobs:
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Build and push arm64
-        uses: docker/build-push-action@v5
+        id: build
+        uses: docker/build-push-action@v6
         with:
           context: .
           platforms: linux/arm64
           push: true
-          tags: ${{ secrets.DOCKERHUB_USERNAME }}/m3u-editor:dev-arm64
+          tags: |
+            ${{ env.REGISTRY_IMAGE }}:dev-arm64
+            ${{ env.REGISTRY_IMAGE }}:dev-${{ needs.get-version.outputs.version }}-arm64
           build-args: |
             GIT_BRANCH=${{ github.ref_name }}
             GIT_COMMIT=${{ github.sha }}
             GIT_TAG=${{ github.ref_type == 'tag' && github.ref_name || '' }}
             M3U_PROXY_REPO=https://github.com/${{ github.repository_owner }}/m3u-proxy.git
             M3U_PROXY_BRANCH=dev
+            M3U_PROXY_COMMIT=${{ needs.get-version.outputs.proxy_commit }}
+          cache-from: type=gha,scope=dev-arm64
+          cache-to: type=gha,mode=max,scope=dev-arm64
           provenance: false
           sbom: false
 
   push-manifest:
-    name: Push Docker Manifest for dev
+    name: Create Multi-arch Manifest
     runs-on: ubuntu-latest
-    needs: [push-amd64, push-arm64]
+    needs: [get-version, push-amd64, push-arm64]
+    if: needs.get-version.outputs.tag_exists != 'true'
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
-
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
@@ -88,11 +160,197 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Create manifest list
+      - name: Create and push dev manifest
         run: |
-          docker manifest create ${{ secrets.DOCKERHUB_USERNAME }}/m3u-editor:dev \
-            ${{ secrets.DOCKERHUB_USERNAME }}/m3u-editor:dev-amd64 \
-            ${{ secrets.DOCKERHUB_USERNAME }}/m3u-editor:dev-arm64
+          docker buildx imagetools create -t ${{ env.REGISTRY_IMAGE }}:dev \
+            ${{ env.REGISTRY_IMAGE }}:dev-amd64 \
+            ${{ env.REGISTRY_IMAGE }}:dev-arm64
 
-      - name: Push manifest list
-        run: docker manifest push ${{ secrets.DOCKERHUB_USERNAME }}/m3u-editor:dev
+      - name: Create and push versioned manifest
+        run: |
+          docker buildx imagetools create -t ${{ env.REGISTRY_IMAGE }}:dev-${{ needs.get-version.outputs.version }} \
+            ${{ env.REGISTRY_IMAGE }}:dev-${{ needs.get-version.outputs.version }}-amd64 \
+            ${{ env.REGISTRY_IMAGE }}:dev-${{ needs.get-version.outputs.version }}-arm64
+
+      - name: Inspect manifests
+        run: |
+          echo "📦 Dev (latest) manifest:"
+          docker buildx imagetools inspect ${{ env.REGISTRY_IMAGE }}:dev
+          echo ""
+          echo "📦 Versioned manifest (dev-${{ needs.get-version.outputs.version }}):"
+          docker buildx imagetools inspect ${{ env.REGISTRY_IMAGE }}:dev-${{ needs.get-version.outputs.version }}
+
+      - name: Summary
+        run: |
+          echo "## 🐳 Docker Images Published" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Tag | Description |" >> $GITHUB_STEP_SUMMARY
+          echo "|-----|-------------|" >> $GITHUB_STEP_SUMMARY
+          echo "| \`${{ env.REGISTRY_IMAGE }}:dev\` | Latest dev build |" >> $GITHUB_STEP_SUMMARY
+          echo "| \`${{ env.REGISTRY_IMAGE }}:dev-${{ needs.get-version.outputs.version }}\` | Pinned version |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Commit:** \`${{ github.sha }}\`" >> $GITHUB_STEP_SUMMARY
+
+  create-release:
+    name: Create Dev Pre-release
+    runs-on: ubuntu-latest
+    needs: [get-version, push-manifest]
+    if: always() && needs.get-version.result == 'success' && needs.get-version.outputs.tag_exists != 'true'
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Find release range via config/dev.php history
+        id: prev_tag
+        run: |
+          VERSION="${{ needs.get-version.outputs.version }}-dev"
+
+          # Build version map: scan config/dev.php first-parent history on dev.
+          # Each distinct version → the oldest commit that first introduced it.
+          prev_ver="" last_hash="" curr_commit="" prev_commit="" prev_prev_commit=""
+          while IFS= read -r hash; do
+            ver=$(git show "${hash}:config/dev.php" 2>/dev/null \
+                  | grep "dev_version" \
+                  | grep -oE "[0-9]+\.[0-9]+\.[0-9]+[-a-z]*" | head -1 || true)
+            [ -z "$ver" ] && continue
+
+            if [ "$ver" != "$prev_ver" ]; then
+              if [ "$prev_ver" = "$VERSION" ]; then
+                curr_commit="$last_hash"
+              elif [ -n "$curr_commit" ] && [ -z "$prev_commit" ]; then
+                prev_commit="$last_hash"
+              elif [ -n "$prev_commit" ] && [ -z "$prev_prev_commit" ]; then
+                prev_prev_commit="$last_hash"
+                break
+              fi
+              prev_ver="$ver"
+            fi
+            last_hash="$hash"
+          done < <(git log HEAD --first-parent --format="%H" -- config/dev.php)
+
+          if [ "$prev_ver" = "$VERSION" ] && [ -z "$curr_commit" ]; then
+            curr_commit="$last_hash"
+          elif [ -n "$curr_commit" ] && [ -z "$prev_commit" ]; then
+            prev_commit="$last_hash"
+          fi
+
+          [ -z "$prev_commit" ] && prev_commit=$(git rev-list --max-parents=0 HEAD)
+
+          echo "curr_commit=${curr_commit}" >> $GITHUB_OUTPUT
+          echo "prev_commit=${prev_commit}" >> $GITHUB_OUTPUT
+          echo "prev_prev_commit=${prev_prev_commit}" >> $GITHUB_OUTPUT
+          echo "Version: $VERSION | curr: ${curr_commit:0:12} | prev: ${prev_commit:0:12} | dedup: ${prev_prev_commit:0:12}"
+
+      - name: Generate changelog
+        run: |
+          CURR="${{ steps.prev_tag.outputs.curr_commit }}"
+          PREV="${{ steps.prev_tag.outputs.prev_commit }}"
+          PREV_PREV="${{ steps.prev_tag.outputs.prev_prev_commit }}"
+
+          # Build list of normalized messages from the PREVIOUS release to exclude cherry-pick duplicates
+          if [ -n "$PREV_PREV" ]; then
+            git log "${PREV_PREV}..${PREV}" --no-merges --pretty=tformat:"%s" \
+              | sed 's/^[^[:alnum:]]*//' | tr '[:upper:]' '[:lower:]' > prev_msgs.tmp
+          else
+            touch prev_msgs.tmp
+          fi
+
+          touch seen.tmp
+          git log "${PREV}..${CURR}" --no-merges --pretty=tformat:"%s|%h" > commits.txt
+
+          while IFS='|' read -r msg hash; do
+            [[ "$msg" =~ ^[Vv]ersion\ bump ]] && continue
+            norm=$(echo "$msg" | sed 's/^[^[:alnum:]]*//' | tr '[:upper:]' '[:lower:]' | sed 's/^[[:space:]]*//')
+            grep -qxF "$norm" seen.tmp && continue        # skip within-range duplicates
+            grep -qxF "$norm" prev_msgs.tmp && continue   # skip messages from previous release
+            echo "$norm" >> seen.tmp
+            if [[ "$norm" =~ ^feat ]]; then
+              printf -- '- %s (`%s`)\n' "$msg" "$hash" >> features.tmp
+            elif [[ "$norm" =~ ^fix ]]; then
+              printf -- '- %s (`%s`)\n' "$msg" "$hash" >> fixes.tmp
+            elif [[ "$norm" =~ ^perf ]]; then
+              printf -- '- %s (`%s`)\n' "$msg" "$hash" >> perf.tmp
+            elif [[ "$norm" =~ ^refactor ]]; then
+              printf -- '- %s (`%s`)\n' "$msg" "$hash" >> refactor.tmp
+            elif [[ "$norm" =~ ^docs ]]; then
+              printf -- '- %s (`%s`)\n' "$msg" "$hash" >> docs.tmp
+            elif [[ "$norm" =~ ^chore ]]; then
+              printf -- '- %s (`%s`)\n' "$msg" "$hash" >> chores.tmp
+            else
+              printf -- '- %s (`%s`)\n' "$msg" "$hash" >> other.tmp
+            fi
+          done < commits.txt
+
+          {
+            echo "## What's Changed"
+            echo ""
+            if [ -f features.tmp ]; then
+              echo "### Features"
+              cat features.tmp
+              echo ""
+            fi
+            if [ -f fixes.tmp ]; then
+              echo "### Bug Fixes"
+              cat fixes.tmp
+              echo ""
+            fi
+            if [ -f perf.tmp ]; then
+              echo "### Performance"
+              cat perf.tmp
+              echo ""
+            fi
+            if [ -f refactor.tmp ]; then
+              echo "### Refactoring"
+              cat refactor.tmp
+              echo ""
+            fi
+            if [ -f docs.tmp ]; then
+              echo "### Documentation"
+              cat docs.tmp
+              echo ""
+            fi
+            if [ -f chores.tmp ]; then
+              echo "### Maintenance"
+              cat chores.tmp
+              echo ""
+            fi
+            if [ -f other.tmp ]; then
+              echo "### Other Changes"
+              cat other.tmp
+              echo ""
+            fi
+            echo "---"
+            echo "### Docker Image"
+            echo '```'
+            echo "docker pull ${{ env.REGISTRY_IMAGE }}:dev-${{ needs.get-version.outputs.version }}"
+            echo '```'
+          } > changelog.md
+
+          rm -f *.tmp commits.txt seen.tmp prev_msgs.tmp
+
+      - name: Create dev pre-release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ needs.get-version.outputs.version }}-dev
+          name: "Dev ${{ needs.get-version.outputs.version }}"
+          body_path: changelog.md
+          prerelease: true
+          generate_release_notes: false
+          make_latest: false
+
+  notify-failure:
+    name: Notify on Failure
+    runs-on: ubuntu-latest
+    needs: [push-amd64, push-arm64, push-manifest, create-release]
+    if: failure()
+    steps:
+      - name: Report failure
+        run: |
+          echo "::error::Dev deployment failed! Check the workflow logs."
+          echo "Failed job: ${{ github.workflow }}"
+          echo "Commit: ${{ github.sha }}"
+          echo "Branch: ${{ github.ref_name }}"

@@ -2,39 +2,109 @@
 
 namespace App\Services;
 
-use Generator;
-use Exception;
 use App\Models\Epg;
 use Carbon\Carbon;
+use Exception;
+use Generator;
 use Illuminate\Http\Client\Response;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Storage;
 use JsonMachine\Items;
 
 /**
- * Service to interact with the Schedules Direct API for EPG data.
+ * Service to interact with the SchedulesDirect API for EPG data.
  */
 class SchedulesDirectService
 {
-    private const BASE_URL = 'https://json.schedulesdirect.org/20141201';
+    private const API_VERSION = '20141201';
+
+    private const BASE_URL = 'https://json.schedulesdirect.org';
 
     private static string $USER_AGENT = 'm3u-editor/dev';
+
     private static bool $FETCH_PROGRAM_ARTWORK = false; // Enable fetching program artwork
+
+    /**
+     * Error code indicating the user's account is not enabled for debug routing.
+     * When received, we must disable debug mode to prevent the user from being blocked.
+     */
+    private const DEBUG_NOT_ENABLED_CODE = 2055;
+
+    /**
+     * The current EPG model being used for requests (used to check/update sd_debug)
+     */
+    private ?Epg $currentEpg = null;
 
     // Configuration constants for performance tuning
     private const MAX_STATIONS_PER_SYNC = null;      // Limit stations for faster processing
+
     private const STATIONS_PER_CHUNK = 50;           // Smaller chunks for speed
+
     private const SCHEDULES_TIMEOUT = 180;           // Reduced timeout
+
     private const DEFAULT_TIMEOUT = 60;              // Default timeout
+
     private const CHUNK_DELAY_MICROSECONDS = 50000;  // Reduced delay (50ms)
+
     private const MAX_RETRIES = 2;                   // Fewer retries for speed
+
     private const PROGRAMS_BATCH_SIZE = 1000;        // Batch size for program requests
 
     public function __construct()
     {
         // Set a more descriptive user agent
-        self::$USER_AGENT = 'm3u-editor/' . config('dev.version');
+        self::$USER_AGENT = 'm3u-editor/'.config('dev.version');
+    }
+
+    /**
+     * Build HTTP headers for SchedulesDirect API requests.
+     * Includes RouteTo:debug header when sd_debug is enabled on the current EPG.
+     */
+    private function buildHeaders(?string $token = null): array
+    {
+        $headers = [
+            'User-Agent' => self::$USER_AGENT,
+        ];
+
+        if ($token) {
+            $headers['token'] = $token;
+        }
+
+        // Add debug routing header if sd_debug is enabled
+        if ($this->currentEpg && $this->currentEpg->sd_debug) {
+            $headers['RouteTo'] = 'debug';
+            Log::debug('Adding RouteTo:debug header for SchedulesDirect request');
+        }
+
+        return $headers;
+    }
+
+    /**
+     * Handle error code 2055 (debug not enabled) by disabling sd_debug on the EPG.
+     * This prevents the user from being blocked if their account isn't enabled for debugging.
+     */
+    private function handleDebugNotEnabledError(): void
+    {
+        if ($this->currentEpg && $this->currentEpg->sd_debug) {
+            Log::warning('SchedulesDirect returned code 2055 - disabling sd_debug to prevent user from being blocked', [
+                'epg_id' => $this->currentEpg->id,
+            ]);
+
+            $this->currentEpg->update(['sd_debug' => false]);
+            $this->currentEpg->refresh();
+        }
+    }
+
+    /**
+     * Set the current EPG model for tracking debug state
+     */
+    public function setCurrentEpg(?Epg $epg): self
+    {
+        $this->currentEpg = $epg;
+
+        return $this;
     }
 
     /**
@@ -96,26 +166,26 @@ class SchedulesDirectService
     }
 
     /**
-     * Authenticate with Schedules Direct and get a token
+     * Authenticate with SchedulesDirect and get a token
      */
     public function authenticate(string $username, string $password): array
     {
         $passwordHash = hash('sha1', $password);
         $response = Http::withHeaders([
             'User-Agent' => self::$USER_AGENT,
-        ])->post(self::BASE_URL . '/token', [
+        ])->post(self::BASE_URL.'/'.self::API_VERSION.'/token', [
             'username' => $username,
             'password' => $passwordHash,
         ]);
 
         if ($response->failed()) {
-            throw new Exception('Authentication failed: ' . $response->body());
+            throw new Exception('Authentication failed: '.$response->body());
         }
 
         $data = $response->json();
 
         if (isset($data['code']) && $data['code'] !== 0) {
-            throw new Exception('Authentication error: ' . ($data['message'] ?? 'Unknown error'));
+            throw new Exception('Authentication error: '.($data['message'] ?? 'Unknown error'));
         }
 
         return [
@@ -130,24 +200,38 @@ class SchedulesDirectService
     public function authenticateFromEpg(Epg $epg): array
     {
         if (! $epg->sd_username || ! $epg->sd_password) {
-            throw new \Exception('Schedules Direct credentials not configured');
+            throw new \Exception('SchedulesDirect credentials not configured');
         }
 
-        $response = Http::withHeaders([
-            'User-Agent' => self::$USER_AGENT,
-        ])->post(self::BASE_URL . '/token', [
+        // Set the current EPG for debug header tracking
+        $this->setCurrentEpg($epg);
+
+        $response = Http::withHeaders($this->buildHeaders())->post(self::BASE_URL.'/'.self::API_VERSION.'/token', [
             'username' => $epg->sd_username,
             'password' => hash('sha1', $epg->sd_password),
         ]);
 
-        if ($response->failed()) {
-            throw new Exception('Authentication failed: ' . $response->body());
-        }
-
         $data = $response->json();
 
+        // Handle code 2055: debug not enabled - disable sd_debug and retry without debug header
+        if (isset($data['code']) && $data['code'] === self::DEBUG_NOT_ENABLED_CODE) {
+            $this->handleDebugNotEnabledError();
+
+            // Retry authentication without the debug header
+            Log::debug('Retrying authentication without debug header');
+            $response = Http::withHeaders($this->buildHeaders())->post(self::BASE_URL.'/'.self::API_VERSION.'/token', [
+                'username' => $epg->sd_username,
+                'password' => hash('sha1', $epg->sd_password),
+            ]);
+            $data = $response->json();
+        }
+
+        if ($response->failed()) {
+            throw new Exception('Authentication failed: '.$response->body());
+        }
+
         if (isset($data['code']) && $data['code'] !== 0) {
-            throw new Exception('Authentication error: ' . ($data['message'] ?? 'Unknown error'));
+            throw new Exception('Authentication error: '.($data['message'] ?? 'Unknown error'));
         }
 
         // Update the EPG model with new token data
@@ -174,18 +258,21 @@ class SchedulesDirectService
 
     /**
      * Get available countries
+     * Results are cached for 5 minutes
      */
     public function getCountries(): array
     {
-        $response = Http::withHeaders([
-            'User-Agent' => self::$USER_AGENT,
-        ])->get(self::BASE_URL . '/available/countries');
+        return Cache::remember('schedules_direct_countries', 300, function () {
+            $response = Http::withHeaders([
+                'User-Agent' => self::$USER_AGENT,
+            ])->get(self::BASE_URL.'/'.self::API_VERSION.'/available/countries');
 
-        if ($response->failed()) {
-            throw new Exception('Failed to get countries from Schedules Direct');
-        }
+            if ($response->failed()) {
+                throw new Exception('Failed to get countries from SchedulesDirect');
+            }
 
-        return $response->json();
+            return $response->json();
+        });
     }
 
     /**
@@ -230,7 +317,7 @@ class SchedulesDirectService
 
         if ($response->failed()) {
             $errorData = $response->json();
-            throw new Exception('Failed to add lineup: ' . ($errorData['message'] ?? $response->body()));
+            throw new Exception('Failed to add lineup: '.($errorData['message'] ?? $response->body()));
         }
 
         return $response->json();
@@ -245,7 +332,7 @@ class SchedulesDirectService
 
         if ($response->failed()) {
             $errorData = $response->json();
-            throw new Exception('Failed to remove lineup: ' . ($errorData['message'] ?? $response->body()));
+            throw new Exception('Failed to remove lineup: '.($errorData['message'] ?? $response->body()));
         }
 
         return $response->json();
@@ -292,12 +379,12 @@ class SchedulesDirectService
     }
 
     /**
-     * Get artwork for programs 
-     * 
+     * Get artwork for programs
+     *
      * Based on testing, the /metadata/programs endpoint returns error 1008 "INCORRECT_REQUEST"
      * for all tested formats. The regular /programs endpoint shows hasImageArtwork=true,
      * indicating artwork is available, but accessed differently.
-     * 
+     *
      * For now, this returns empty array but could be enhanced to:
      * 1. Check for artwork URLs embedded in program responses
      * 2. Try alternative API endpoints for metadata
@@ -309,12 +396,12 @@ class SchedulesDirectService
             return [];
         }
 
-        // Schedules Direct has a limit of 500 program IDs per request
+        // SchedulesDirect has a limit of 500 program IDs per request
         $maxBatchSize = 500;
         $allArtwork = [];
 
         try {
-            Log::debug('Fetching program artwork from Schedules Direct', [
+            Log::debug('Fetching program artwork from SchedulesDirect', [
                 'program_count' => count($programIds),
                 'batches_needed' => ceil(count($programIds) / $maxBatchSize),
             ]);
@@ -329,23 +416,30 @@ class SchedulesDirectService
                 ]);
 
                 // The correct endpoint requires a trailing slash: /metadata/programs/
-                $response = Http::withHeaders([
-                    'User-Agent' => self::$USER_AGENT,
-                    'token' => $token,
-                ])->timeout(30)->post(self::BASE_URL . '/metadata/programs/', $batch);
+                $response = Http::withHeaders($this->buildHeaders($token))->timeout(30)->post(self::BASE_URL.'/'.self::API_VERSION.'/metadata/programs/', $batch);
+
+                $artworkData = $response->json();
+
+                // Handle code 2055: debug not enabled - disable sd_debug and retry without debug header
+                if (isset($artworkData['code']) && $artworkData['code'] === self::DEBUG_NOT_ENABLED_CODE) {
+                    $this->handleDebugNotEnabledError();
+
+                    // Retry the request without the debug header
+                    Log::debug('Retrying artwork request without debug header');
+                    $response = Http::withHeaders($this->buildHeaders($token))->timeout(30)->post(self::BASE_URL.'/'.self::API_VERSION.'/metadata/programs/', $batch);
+                    $artworkData = $response->json();
+                }
 
                 if ($response->successful()) {
-                    $artworkData = $response->json();
-
                     foreach ($artworkData as $programArtwork) {
                         $programId = $programArtwork['programID'] ?? null;
                         $artworkItems = $programArtwork['data'] ?? [];
 
-                        if ($programId && !empty($artworkItems)) {
+                        if ($programId && ! empty($artworkItems)) {
                             // Group and process all artwork types, not just the "best" one
                             $processedArtwork = $this->selectBestArtwork($artworkItems, $epgUuid);
 
-                            if (!empty($processedArtwork)) {
+                            if (! empty($processedArtwork)) {
                                 $allArtwork[$programId] = $processedArtwork;
                             }
                         }
@@ -376,6 +470,7 @@ class SchedulesDirectService
                 'error' => $e->getMessage(),
                 'program_count' => count($programIds),
             ]);
+
             return [];
         }
     }
@@ -390,10 +485,14 @@ class SchedulesDirectService
 
         // Group artwork by type
         foreach ($artworkItems as $artwork) {
-            if (empty($artwork['uri'])) continue;
+            if (empty($artwork['uri'])) {
+                continue;
+            }
 
             $xmltvType = $this->mapSchedulesDirectCategoryToXMLTV($artwork['category'] ?? '');
-            if (empty($xmltvType)) continue; // Skip unmappable types
+            if (empty($xmltvType)) {
+                continue;
+            } // Skip unmappable types
 
             $typeGroups[$xmltvType][] = $artwork;
         }
@@ -404,6 +503,7 @@ class SchedulesDirectService
             usort($artworks, function ($a, $b) {
                 $scoreA = $this->calculateArtworkScore($a);
                 $scoreB = $this->calculateArtworkScore($b);
+
                 return $scoreB <=> $scoreA; // Descending order (highest score first)
             });
 
@@ -422,7 +522,7 @@ class SchedulesDirectService
                     'orient' => $this->determineOrientation($artwork['width'] ?? 0, $artwork['height'] ?? 0),
                     'size' => $this->mapImageSize($artwork['width'] ?? 0, $artwork['height'] ?? 0),
                     'category' => $artwork['category'] ?? '',
-                    'tier' => $artwork['tier'] ?? ''
+                    'tier' => $artwork['tier'] ?? '',
                 ];
 
                 $selectedArtwork[] = $artworkInfo;
@@ -432,7 +532,7 @@ class SchedulesDirectService
         Log::debug('Artwork selection completed', [
             'original_count' => count($artworkItems),
             'selected_count' => count($selectedArtwork),
-            'types_found' => array_keys($typeGroups)
+            'types_found' => array_keys($typeGroups),
         ]);
 
         return $selectedArtwork;
@@ -450,11 +550,21 @@ class SchedulesDirectService
         $height = $artwork['height'] ?? 0;
         $pixels = $width * $height;
 
-        if ($pixels >= 1000000) $score += 100; // 1MP+
-        elseif ($pixels >= 500000) $score += 80;  // 500K+
-        elseif ($pixels >= 250000) $score += 60;  // 250K+
-        elseif ($pixels >= 100000) $score += 40;  // 100K+
-        else $score += 20; // Small images
+        if ($pixels >= 1000000) {
+            $score += 100;
+        } // 1MP+
+        elseif ($pixels >= 500000) {
+            $score += 80;
+        }  // 500K+
+        elseif ($pixels >= 250000) {
+            $score += 60;
+        }  // 250K+
+        elseif ($pixels >= 100000) {
+            $score += 40;
+        }  // 100K+
+        else {
+            $score += 20;
+        } // Small images
 
         // Tier scoring (Episode > Season > Series)
         $tier = strtolower($artwork['tier'] ?? '');
@@ -475,10 +585,15 @@ class SchedulesDirectService
 
         // Category scoring (prefer iconic/poster over banners)
         $category = strtolower($artwork['category'] ?? '');
-        if (str_contains($category, 'iconic')) $score += 30;
-        elseif (str_contains($category, 'poster')) $score += 25;
-        elseif (str_contains($category, 'banner-l1')) $score += 20;
-        elseif (str_contains($category, 'banner')) $score += 10;
+        if (str_contains($category, 'iconic')) {
+            $score += 30;
+        } elseif (str_contains($category, 'poster')) {
+            $score += 25;
+        } elseif (str_contains($category, 'banner-l1')) {
+            $score += 20;
+        } elseif (str_contains($category, 'banner')) {
+            $score += 10;
+        }
 
         return $score;
     }
@@ -497,16 +612,16 @@ class SchedulesDirectService
         if ($epgUuid) {
             return route('schedules-direct.image.proxy', [
                 'epg' => $epgUuid,
-                'imageHash' => $uri
+                'imageHash' => $uri,
             ]);
         }
 
         // Fallback to direct URL (will require authentication)
-        return self::BASE_URL . '/image/' . $uri;
+        return self::BASE_URL.'/'.self::API_VERSION.'/image/'.$uri;
     }
 
     /**
-     * Map Schedules Direct artwork categories to XMLTV image types
+     * Map SchedulesDirect artwork categories to XMLTV image types
      */
     private function mapSchedulesDirectCategoryToXMLTV(string $category): string
     {
@@ -615,13 +730,17 @@ class SchedulesDirectService
     }
 
     /**
-     * Fetch Schedules Direct EPG data and update the EPG record
+     * Fetch SchedulesDirect EPG data and update the EPG record
      */
     public function syncEpgData(Epg $epg): void
     {
-        Log::debug('Starting Schedules Direct sync', [
+        // Set the current EPG for debug header tracking
+        $this->setCurrentEpg($epg);
+
+        Log::debug('Starting SchedulesDirect sync', [
             'epg_id' => $epg->id,
             'chunk_size' => self::STATIONS_PER_CHUNK,
+            'sd_debug' => $epg->sd_debug,
         ]);
         try {
             // Validate token or re-authenticate
@@ -631,7 +750,7 @@ class SchedulesDirectService
 
             // Get lineup data
             if (! $epg->hasSchedulesDirectLineup()) {
-                throw new \Exception('No lineup configured for Schedules Direct EPG');
+                throw new \Exception('No lineup configured for SchedulesDirect EPG');
             }
 
             // Set the metadata fetching flag
@@ -649,7 +768,7 @@ class SchedulesDirectService
                 $lineupData = $this->getLineup($epg->sd_token, $epg->sd_lineup_id);
             } catch (Exception $e) {
                 if (str_contains($e->getMessage(), 'Lineup not in account') || str_contains($e->getMessage(), 'not subscribed')) {
-                    Log::debug("Adding lineup {$epg->sd_lineup_id} to Schedules Direct account", ['epg_id' => $epg->id]);
+                    Log::debug("Adding lineup {$epg->sd_lineup_id} to SchedulesDirect account", ['epg_id' => $epg->id]);
                     $this->addLineup($epg->sd_token, $epg->sd_lineup_id);
                     $lineupData = $this->getLineup($epg->sd_token, $epg->sd_lineup_id);
                 } else {
@@ -668,7 +787,7 @@ class SchedulesDirectService
                 ? array_slice($epg->sd_station_ids, 0, self::MAX_STATIONS_PER_SYNC)
                 : $epg->sd_station_ids;
 
-            Log::debug('Starting Schedules Direct sync', [
+            Log::debug('Starting SchedulesDirect sync', [
                 'epg_id' => $epg->id,
                 'station_count' => count($stationIds),
                 'chunk_size' => self::STATIONS_PER_CHUNK,
@@ -689,7 +808,7 @@ class SchedulesDirectService
                 'sd_errors' => null,
                 'sd_progress' => 100,
             ]);
-            Log::debug('Successfully completed Schedules Direct sync', [
+            Log::debug('Successfully completed SchedulesDirect sync', [
                 'epg_id' => $epg->id,
                 'stations_processed' => count($stationIds),
                 'file_path' => $xmlFilePath,
@@ -702,7 +821,7 @@ class SchedulesDirectService
             ];
 
             $epg->update(['sd_errors' => $errors]);
-            Log::error('Failed to sync Schedules Direct EPG data', [
+            Log::error('Failed to sync SchedulesDirect EPG data', [
                 'epg_id' => $epg->id,
                 'error' => $e->getMessage(),
             ]);
@@ -773,7 +892,7 @@ class SchedulesDirectService
     private function writeXMLTVHeader($file, array $lineupData, array $artworkCache = []): void
     {
         fwrite($file, "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
-        fwrite($file, "<tv generator-info-name=\"m3u editor Schedules Direct Integration\" generator-info-url=\"https://github.com/sparkison/m3u-editor\">\n");
+        fwrite($file, "<tv generator-info-name=\"m3u editor SchedulesDirect Integration\" generator-info-url=\"https://github.com/sparkison/m3u-editor\">\n");
 
         // Write channels
         $stationsById = [];
@@ -848,7 +967,7 @@ class SchedulesDirectService
             ]);
 
             // Stream through schedule chunk and collect unique program IDs using file-based deduplication
-            $tempProgramIdFile = tempnam(sys_get_temp_dir(), 'epg_programs_chunk_' . $chunkIndex . '_');
+            $tempProgramIdFile = tempnam(sys_get_temp_dir(), 'epg_programs_chunk_'.$chunkIndex.'_');
             $programIdHandle = fopen($tempProgramIdFile, 'w');
             $seenProgramIds = []; // Small lookup table for deduplication
             $scheduleCount = 0;
@@ -860,7 +979,7 @@ class SchedulesDirectService
                     // Use array key existence check for O(1) deduplication
                     if (! isset($seenProgramIds[$programId])) {
                         $seenProgramIds[$programId] = true;
-                        fwrite($programIdHandle, $programId . "\n");
+                        fwrite($programIdHandle, $programId."\n");
                         $programCount++;
                     }
                 }
@@ -995,10 +1114,21 @@ class SchedulesDirectService
             $fullArtworkCache = array_merge($artworkCache, ['programs' => $programArtworkCache]);
 
             // Stream the API response directly to a file
-            $response = Http::withHeaders([
-                'User-Agent' => self::$USER_AGENT,
-                'token' => $token,
-            ])->timeout(300)->sink($tempResponseFile)->post(self::BASE_URL . '/programs', $programBatch);
+            $response = Http::withHeaders($this->buildHeaders($token))->timeout(300)->sink($tempResponseFile)->post(self::BASE_URL.'/'.self::API_VERSION.'/programs', $programBatch);
+
+            // Check for error code 2055 in the response file (API returns error as JSON even on failure)
+            if (! $response->successful() && file_exists($tempResponseFile)) {
+                $errorContent = file_get_contents($tempResponseFile);
+                $errorData = json_decode($errorContent, true);
+                if (isset($errorData['code']) && $errorData['code'] === self::DEBUG_NOT_ENABLED_CODE) {
+                    $this->handleDebugNotEnabledError();
+
+                    // Retry the request without the debug header
+                    Log::debug('Retrying program batch request without debug header');
+                    $response = Http::withHeaders($this->buildHeaders($token))->timeout(300)->sink($tempResponseFile)->post(self::BASE_URL.'/'.self::API_VERSION.'/programs', $programBatch);
+                }
+            }
+
             if ($response->successful()) {
                 // Stream through the program response and match with schedules immediately
                 $programs = Items::fromFile($tempResponseFile);
@@ -1152,17 +1282,12 @@ class SchedulesDirectService
     }
 
     /**
-     * Make authenticated request to Schedules Direct API with improved error handling
+     * Make authenticated request to SchedulesDirect API with improved error handling
      */
     private function makeRequest(string $method, string $endpoint, array $data = [], ?string $token = null): Response
     {
-        $headers = [
-            'User-Agent' => self::$USER_AGENT,
-        ];
-        if ($token) {
-            $headers['token'] = $token;
-        }
-        $url = self::BASE_URL . $endpoint;
+        $headers = $this->buildHeaders($token);
+        $url = self::BASE_URL.'/'.self::API_VERSION.$endpoint;
 
         // Configure timeout based on endpoint and data size
         $timeout = self::DEFAULT_TIMEOUT;
@@ -1192,7 +1317,7 @@ class SchedulesDirectService
                 'allow_redirects' => ['strict' => true],
             ]);
 
-        Log::debug('Making Schedules Direct API request', [
+        Log::debug('Making SchedulesDirect API request', [
             'method' => $method,
             'endpoint' => $endpoint,
             'timeout' => $timeout,
@@ -1202,7 +1327,7 @@ class SchedulesDirectService
         try {
             $startTime = microtime(true);
             if ($method === 'GET' && ! empty($data)) {
-                $url .= '?' . http_build_query($data);
+                $url .= '?'.http_build_query($data);
                 $response = $request->get($url);
             } elseif ($method === 'POST') {
                 $response = $request->post($url, $data);
@@ -1212,7 +1337,7 @@ class SchedulesDirectService
                 $response = $request->send($method, $url, ['json' => $data]);
             }
             $duration = round(microtime(true) - $startTime, 2);
-            Log::debug('Schedules Direct API request completed', [
+            Log::debug('SchedulesDirect API request completed', [
                 'method' => $method,
                 'endpoint' => $endpoint,
                 'duration_seconds' => $duration,
@@ -1220,21 +1345,59 @@ class SchedulesDirectService
                 'response_size' => strlen($response->body()),
             ]);
         } catch (\Exception $e) {
-            Log::error('Schedules Direct API request failed', [
+            Log::error('SchedulesDirect API request failed', [
                 'method' => $method,
                 'endpoint' => $endpoint,
                 'timeout' => $timeout,
                 'error' => $e->getMessage(),
                 'error_class' => get_class($e),
             ]);
-            throw new Exception("Schedules Direct API request failed: {$e->getMessage()}");
+            throw new Exception("SchedulesDirect API request failed: {$e->getMessage()}");
         }
-        if ($response->failed()) {
-            $body = $response->json();
-            $message = $body['message'] ?? $body['response'] ?? 'Unknown error';
-            $code = $body['code'] ?? $response->status();
+        // Check response body for error codes (API may return error codes in successful HTTP responses)
+        $body = $response->json();
+        $responseCode = $body['code'] ?? null;
 
-            Log::error('Schedules Direct API error response', [
+        // Handle code 2055: debug not enabled - disable sd_debug and retry without debug header
+        if ($responseCode === self::DEBUG_NOT_ENABLED_CODE) {
+            $this->handleDebugNotEnabledError();
+
+            // Retry the request without the debug header
+            Log::debug('Retrying request without debug header', [
+                'method' => $method,
+                'endpoint' => $endpoint,
+            ]);
+
+            $headers = $this->buildHeaders($token);
+            $request = Http::withHeaders($headers)
+                ->timeout($timeout)
+                ->retry(2, 1000)
+                ->withOptions([
+                    'verify' => true,
+                    'stream' => false,
+                    'max_redirects' => 3,
+                    'allow_redirects' => ['strict' => true],
+                ]);
+
+            if ($method === 'GET' && ! empty($data)) {
+                $response = $request->get($url);
+            } elseif ($method === 'POST') {
+                $response = $request->post($url, $data);
+            } elseif ($method === 'PUT') {
+                $response = $request->put($url, $data);
+            } else {
+                $response = $request->send($method, $url, ['json' => $data]);
+            }
+
+            $body = $response->json();
+            $responseCode = $body['code'] ?? null;
+        }
+
+        if ($response->failed()) {
+            $message = $body['message'] ?? $body['response'] ?? 'Unknown error';
+            $code = $responseCode ?? $response->status();
+
+            Log::error('SchedulesDirect API error response', [
                 'method' => $method,
                 'endpoint' => $endpoint,
                 'status' => $response->status(),
@@ -1242,7 +1405,7 @@ class SchedulesDirectService
                 'message' => $message,
                 'full_response' => $response->body(),
             ]);
-            throw new Exception("Schedules Direct API error: {$message} (Code: {$code})");
+            throw new Exception("SchedulesDirect API error: {$message} (Code: {$code})");
         }
 
         return $response;
