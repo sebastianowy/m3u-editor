@@ -2,18 +2,23 @@
 
 namespace App\Providers;
 
+use App\Console\Commands\NetworkBroadcastEnsure;
+use App\Console\Commands\NetworkBroadcastHeal;
+use App\Enums\Status;
 use App\Events\EpgCreated;
 use App\Events\EpgDeleted;
 use App\Events\EpgUpdated;
 use App\Events\PlaylistCreated;
 use App\Events\PlaylistDeleted;
 use App\Events\PlaylistUpdated;
+use App\Jobs\ProcessChannelScrubber;
 use App\Jobs\SyncMediaServer;
 use App\Livewire\BackupDestinationListRecords;
 use App\Livewire\StreamPlayer;
 use App\Livewire\TmdbSearch;
 use App\Models\Channel;
 use App\Models\ChannelFailover;
+use App\Models\ChannelScrubber;
 use App\Models\CustomPlaylist;
 use App\Models\Epg;
 use App\Models\Group;
@@ -22,9 +27,11 @@ use App\Models\MergedPlaylist;
 use App\Models\Network;
 use App\Models\Playlist;
 use App\Models\PlaylistAlias;
+use App\Models\PlaylistViewer;
 use App\Models\StreamFileSetting;
 use App\Models\StreamProfile;
 use App\Models\User;
+use App\Services\DateFormatService;
 use App\Services\EpgCacheService;
 use App\Services\GitInfoService;
 use App\Services\NetworkBroadcastService;
@@ -37,7 +44,14 @@ use Dedoc\Scramble\Scramble;
 use Dedoc\Scramble\Support\Generator\OpenApi;
 use Dedoc\Scramble\Support\Generator\SecurityScheme;
 use Exception;
+use Filament\Forms\Components\Field;
+use Filament\Forms\Components\FileUpload;
+use Filament\Infolists\Components\ImageEntry;
+use Filament\Schemas\Components\Fieldset;
+use Filament\Schemas\Components\Grid;
+use Filament\Schemas\Components\Section;
 use Filament\Support\Facades\FilamentView;
+use Filament\Tables\Columns\ImageColumn;
 use Filament\View\PanelsRenderHook;
 use Illuminate\Cache\RateLimiting\Limit;
 use Illuminate\Database\Eloquent\Model;
@@ -45,6 +59,7 @@ use Illuminate\Database\Schema\Blueprint;
 use Illuminate\Http\Request;
 use Illuminate\Routing\Route;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\File;
 use Illuminate\Support\Facades\Gate;
 use Illuminate\Support\Facades\Log;
@@ -52,10 +67,11 @@ use Illuminate\Support\Facades\RateLimiter;
 use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Facades\URL;
-use Illuminate\Support\HtmlString;
 use Illuminate\Support\ServiceProvider;
 use Illuminate\Support\Str;
 use Livewire\Livewire;
+use SocialiteProviders\Manager\SocialiteWasCalled;
+use SocialiteProviders\OIDC\OIDCExtendSocialite;
 use Spatie\Tags\Tag;
 use Throwable;
 
@@ -77,8 +93,8 @@ class AppServiceProvider extends ServiceProvider
             }
 
             $this->commands([
-                \App\Console\Commands\NetworkBroadcastHeal::class,
-                \App\Console\Commands\NetworkBroadcastEnsure::class,
+                NetworkBroadcastHeal::class,
+                NetworkBroadcastEnsure::class,
             ]);
         }
     }
@@ -128,8 +144,22 @@ class AppServiceProvider extends ServiceProvider
         // Setup the services
         $this->setupServices();
 
+        // Apply user-defined timezone (when TZ env var is not set)
+        $this->applyTimezoneFromSettings();
+
+        // Register the OIDC Socialite driver (when enabled)
+        $this->registerOidcProvider();
+
         // Livewire components
         $this->registerLivewireComponents();
+
+        // Override the public storage URL at runtime so it always reflects the
+        // actual request scheme/host, even when the config is cached via
+        // `php artisan optimize`. This fixes 404s when the app is accessed via a
+        // TLD/reverse proxy that differs from APP_URL.
+        if (! app()->runningInConsole()) {
+            config(['filesystems.disks.public.url' => url('/storage')]);
+        }
     }
 
     /**
@@ -354,10 +384,10 @@ class AppServiceProvider extends ServiceProvider
     {
         // Allow only the admin to download and delete backups
         Gate::define('download-backup', function (User $user) {
-            return in_array($user->email, config('dev.admin_emails'), true);
+            return $user->isAdmin();
         });
         Gate::define('delete-backup', function (User $user) {
-            return in_array($user->email, config('dev.admin_emails'), true);
+            return $user->isAdmin();
         });
     }
 
@@ -437,6 +467,11 @@ class AppServiceProvider extends ServiceProvider
                 event(new PlaylistDeleted($playlist));
                 $playlist->postProcesses()->detach();
 
+                // Delete associated viewers (watch progress cascades via FK)
+                PlaylistViewer::where('viewerable_type', Playlist::class)
+                    ->where('viewerable_id', $playlist->id)
+                    ->delete();
+
                 return $playlist;
             });
 
@@ -500,6 +535,11 @@ class AppServiceProvider extends ServiceProvider
                 // Remove short URLs
                 $mergedPlaylist->removeShortUrls();
 
+                // Delete associated viewers (watch progress cascades via FK)
+                PlaylistViewer::where('viewerable_type', MergedPlaylist::class)
+                    ->where('viewerable_id', $mergedPlaylist->id)
+                    ->delete();
+
                 return $mergedPlaylist;
             });
 
@@ -543,6 +583,11 @@ class AppServiceProvider extends ServiceProvider
                 Tag::query()
                     ->where('type', $customPlaylist->uuid)
                     ->orWhere('type', $customPlaylist->uuid.'-category')
+                    ->delete();
+
+                // Delete associated viewers (watch progress cascades via FK)
+                PlaylistViewer::where('viewerable_type', CustomPlaylist::class)
+                    ->where('viewerable_id', $customPlaylist->id)
                     ->delete();
 
                 return $customPlaylist;
@@ -608,6 +653,11 @@ class AppServiceProvider extends ServiceProvider
                 // Remove short URLs
                 $playlistAlias->removeShortUrls();
 
+                // Delete associated viewers (watch progress cascades via FK)
+                PlaylistViewer::where('viewerable_type', PlaylistAlias::class)
+                    ->where('viewerable_id', $playlistAlias->id)
+                    ->delete();
+
                 return $playlistAlias;
             });
 
@@ -657,6 +707,20 @@ class AppServiceProvider extends ServiceProvider
                 Channel::where('network_id', $network->id)->delete();
             });
 
+            // ChannelScrubber
+            ChannelScrubber::creating(function (ChannelScrubber $scrubber) {
+                if (! $scrubber->user_id) {
+                    $scrubber->user_id = auth()->id();
+                }
+                $scrubber->uuid = Str::orderedUuid()->toString();
+
+                return $scrubber;
+            });
+            ChannelScrubber::created(function (ChannelScrubber $scrubber) {
+                $scrubber->update(['status' => Status::Processing, 'progress' => 0]);
+                dispatch(new ProcessChannelScrubber($scrubber->id));
+            });
+
             // StreamFileSetting
             StreamFileSetting::creating(function (StreamFileSetting $setting) {
                 if (! $setting->user_id) {
@@ -665,6 +729,26 @@ class AppServiceProvider extends ServiceProvider
 
                 return $setting;
             });
+
+            // Auto-create Admin PlaylistViewer on new playlist/alias creation
+            $autoCreateAdminViewer = function ($record) {
+                $adminUser = User::where('is_admin', true)->first();
+                if (! $adminUser) {
+                    return;
+                }
+                PlaylistViewer::create([
+                    'ulid' => (string) Str::ulid(),
+                    'name' => $adminUser->name,
+                    'is_admin' => true,
+                    'viewerable_type' => get_class($record),
+                    'viewerable_id' => $record->id,
+                ]);
+            };
+
+            Playlist::created($autoCreateAdminViewer);
+            CustomPlaylist::created($autoCreateAdminViewer);
+            MergedPlaylist::created($autoCreateAdminViewer);
+            PlaylistAlias::created($autoCreateAdminViewer);
 
             // ...
 
@@ -679,12 +763,6 @@ class AppServiceProvider extends ServiceProvider
      */
     private function registerFilamentHooks(): void
     {
-        // Add scroll to top event listener
-        FilamentView::registerRenderHook(
-            PanelsRenderHook::SCRIPTS_AFTER,
-            fn (): string => new HtmlString('<script>document.addEventListener("scroll-to-top", () => window.scrollTo({top: 0, left: 0, behavior: "smooth"}))</script>'),
-        );
-
         // Add footer view
         FilamentView::registerRenderHook(
             PanelsRenderHook::FOOTER,
@@ -707,7 +785,7 @@ class AppServiceProvider extends ServiceProvider
 
         // Allow access to api docs
         Gate::define('viewApiDocs', function (User $user) use ($showApiDocs) {
-            return $showApiDocs && in_array($user->email, config('dev.admin_emails'), true);
+            return $showApiDocs && $user->isAdmin();
         });
 
         // Configure the API
@@ -731,10 +809,46 @@ class AppServiceProvider extends ServiceProvider
     }
 
     /**
+     * Apply the user-defined application timezone from settings when the
+     * TZ environment variable is not explicitly set.
+     *
+     * When TZ is defined in the environment it always takes priority (matching
+     * standard Laravel / PHP behaviour). Otherwise, the value stored in
+     * GeneralSettings::app_timezone is applied so that all PHP date/Carbon
+     * calls use the correct timezone throughout the application.
+     */
+    private function applyTimezoneFromSettings(): void
+    {
+        // TZ environment variable always takes priority
+        $envTimezone = config('dev.timezone');
+        if (! empty($envTimezone)) {
+            config(['app.timezone' => $envTimezone]);
+            date_default_timezone_set($envTimezone);
+
+            return;
+        }
+
+        try {
+            $settings = app(GeneralSettings::class);
+            $timezone = $settings->app_timezone;
+
+            if (! empty($timezone) && in_array($timezone, \DateTimeZone::listIdentifiers(), true)) {
+                config(['app.timezone' => $timezone]);
+                date_default_timezone_set($timezone);
+            }
+        } catch (Throwable) {
+            // Settings may not be available during fresh installs / migrations
+        }
+    }
+
+    /**
      * Setup the services.
      */
     public function setupServices(): void
     {
+        // Register the date format service
+        $this->app->singleton(DateFormatService::class);
+
         // Register the proxy service
         $this->app->singleton('proxy', function () {
             return new ProxyService;
@@ -767,18 +881,33 @@ class AppServiceProvider extends ServiceProvider
     }
 
     /**
+     * Register the OIDC Socialite driver when OIDC authentication is enabled.
+     */
+    private function registerOidcProvider(): void
+    {
+        if (! config('services.oidc.enabled')) {
+            return;
+        }
+
+        Event::listen(
+            SocialiteWasCalled::class,
+            [OIDCExtendSocialite::class, 'handle'],
+        );
+    }
+
+    /**
      * Configure Filament v4 to preserve v3 behavior.
      */
     private function configureFilamentV3Compatibility(): void
     {
         // Preserve v3 file upload behavior (public visibility)
-        \Filament\Forms\Components\FileUpload::configureUsing(fn (\Filament\Forms\Components\FileUpload $fileUpload) => $fileUpload
+        FileUpload::configureUsing(fn (FileUpload $fileUpload) => $fileUpload
             ->visibility('public'));
 
-        \Filament\Tables\Columns\ImageColumn::configureUsing(fn (\Filament\Tables\Columns\ImageColumn $imageColumn) => $imageColumn
+        ImageColumn::configureUsing(fn (ImageColumn $imageColumn) => $imageColumn
             ->visibility('public'));
 
-        \Filament\Infolists\Components\ImageEntry::configureUsing(fn (\Filament\Infolists\Components\ImageEntry $imageEntry) => $imageEntry
+        ImageEntry::configureUsing(fn (ImageEntry $imageEntry) => $imageEntry
             ->visibility('public'));
 
         // // Preserve v3 table filter behavior (not deferred)
@@ -787,17 +916,17 @@ class AppServiceProvider extends ServiceProvider
         //     ->paginationPageOptions([5, 10, 25, 50, 'all']));
 
         // Preserve v3 layout component behavior (column span full)
-        \Filament\Schemas\Components\Fieldset::configureUsing(fn (\Filament\Schemas\Components\Fieldset $fieldset) => $fieldset
+        Fieldset::configureUsing(fn (Fieldset $fieldset) => $fieldset
             ->columnSpanFull());
 
-        \Filament\Schemas\Components\Grid::configureUsing(fn (\Filament\Schemas\Components\Grid $grid) => $grid
+        Grid::configureUsing(fn (Grid $grid) => $grid
             ->columnSpanFull());
 
-        \Filament\Schemas\Components\Section::configureUsing(fn (\Filament\Schemas\Components\Section $section) => $section
+        Section::configureUsing(fn (Section $section) => $section
             ->columnSpanFull());
 
         // Preserve v3 unique validation behavior (not ignoring record by default)
-        \Filament\Forms\Components\Field::configureUsing(fn (\Filament\Forms\Components\Field $field) => $field
+        Field::configureUsing(fn (Field $field) => $field
             ->uniqueValidationIgnoresRecordByDefault(false));
     }
 }

@@ -12,6 +12,7 @@ use App\Services\M3uProxyService;
 use App\Services\ProfileService;
 use Carbon\Carbon;
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Support\Collection;
 use Livewire\Component;
 
 class PlaylistInfo extends Component
@@ -94,24 +95,11 @@ class PlaylistInfo extends Component
             // 'last_synced' => $playlist->synced ? Carbon::parse($playlist->synced)->diffForHumans() : 'Never',
         ];
         if ($playlist->enable_proxy) {
-            // Determine if this playlist (or its sources) use provider profiles.
-            // For CustomPlaylist/MergedPlaylist, check if source playlists have profiles enabled.
-            $profileSourcePlaylists = $this->resolveProfileSourcePlaylists($playlist);
-            $hasProfiles = $profileSourcePlaylists->isNotEmpty();
-
-            if ($hasProfiles) {
-                // Use actual proxy count for active streams and aggregate profile capacity
-                $activeStreams = M3uProxyService::getPlaylistActiveStreamsCount($playlist);
-                $availableStreams = 0;
-                foreach ($profileSourcePlaylists as $sourcePlaylist) {
-                    $poolStatus = ProfileService::getPoolStatus($sourcePlaylist);
-                    $availableStreams += $poolStatus['total_capacity'];
-                }
-            } else {
-                // Use m3u-proxy active streams count and playlist-level limit
-                $activeStreams = M3uProxyService::getPlaylistActiveStreamsCount($playlist);
-                $availableStreams = $playlist->available_streams ?? 0;
-            }
+            // Use m3u-proxy active streams count and playlist-level available_streams limit.
+            // available_streams is the authoritative proxy-level limit regardless of
+            // whether provider profiles are enabled (provider limits are separate).
+            $activeStreams = M3uProxyService::getPlaylistActiveStreamsCount($playlist);
+            $availableStreams = $playlist->available_streams ?? 0;
 
             if ($availableStreams === 0) {
                 $availableStreams = '∞';
@@ -170,7 +158,7 @@ class PlaylistInfo extends Component
      * For a PlaylistAlias, delegates to the effective playlist (Playlist or CustomPlaylist).
      * For other playlist types, returns an empty collection.
      */
-    private function resolveProfileSourcePlaylists(Model $playlist): \Illuminate\Support\Collection
+    private function resolveProfileSourcePlaylists(Model $playlist): Collection
     {
         if ($playlist instanceof Playlist && $playlist->profiles_enabled) {
             return collect([$playlist]);

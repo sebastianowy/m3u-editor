@@ -5,13 +5,16 @@ namespace App\Models;
 use App\Enums\PlaylistChannelId;
 use App\Traits\ShortUrlTrait;
 use Illuminate\Database\Eloquent\Casts\Attribute;
+use Illuminate\Database\Eloquent\Collection;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\BelongsToMany;
 use Illuminate\Database\Eloquent\Relations\HasMany;
+use Illuminate\Database\Eloquent\Relations\MorphMany;
 use Illuminate\Database\Eloquent\Relations\MorphToMany;
 use Spatie\Tags\HasTags;
+use Spatie\Tags\Tag;
 
 class CustomPlaylist extends Model
 {
@@ -114,7 +117,7 @@ class CustomPlaylist extends Model
 
     public function groupTags(): MorphToMany
     {
-        return $this->morphToMany(\Spatie\Tags\Tag::class, 'taggable')
+        return $this->morphToMany(Tag::class, 'taggable')
             ->where('type', $this->uuid);
     }
 
@@ -125,7 +128,7 @@ class CustomPlaylist extends Model
 
     public function categoryTags(): MorphToMany
     {
-        return $this->morphToMany(\Spatie\Tags\Tag::class, 'taggable')
+        return $this->morphToMany(Tag::class, 'taggable')
             ->where('type', $this->uuid.'-category');
     }
 
@@ -161,7 +164,7 @@ class CustomPlaylist extends Model
      * This is useful for determining which provider credentials need to be configured
      * when creating a Playlist Alias.
      */
-    public function getSourcePlaylists(): \Illuminate\Database\Eloquent\Collection
+    public function getSourcePlaylists(): Collection
     {
         $playlistIds = $this->channels()
             ->whereNotNull('playlist_id')
@@ -210,7 +213,7 @@ class CustomPlaylist extends Model
     /**
      * Get source playlists that have provider profiles enabled.
      */
-    public function getPooledSourcePlaylists(): \Illuminate\Database\Eloquent\Collection
+    public function getPooledSourcePlaylists(): Collection
     {
         $playlistIds = $this->channels()
             ->whereNotNull('playlist_id')
@@ -220,6 +223,11 @@ class CustomPlaylist extends Model
         return Playlist::whereIn('id', $playlistIds)
             ->where('profiles_enabled', true)
             ->get();
+    }
+
+    public function playlistViewers(): MorphMany
+    {
+        return $this->morphMany(PlaylistViewer::class, 'viewerable');
     }
 
     public function enableProxy(): Attribute

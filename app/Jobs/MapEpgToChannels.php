@@ -35,6 +35,10 @@ class MapEpgToChannels implements ShouldQueue
         $chunkSize = 10;
         $map = EpgMap::where('uuid', $this->batchNo)->first();
 
+        if (! $map) {
+            return;
+        }
+
         // Process the jobs
         foreach (Job::whereIn('id', $this->jobs)->cursor() as $index => $job) {
             $bulk = [];
@@ -59,7 +63,8 @@ class MapEpgToChannels implements ShouldQueue
 
             // Upsert the channels
             Channel::upsert($bulk, uniqueBy: ['source_id', 'playlist_id'], update: [
-                'epg_channel_id', // this is the only field we want to update...
+                'epg_channel_id',
+                'logo_type',
             ]);
         }
     }

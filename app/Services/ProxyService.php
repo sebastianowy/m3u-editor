@@ -3,7 +3,7 @@
 namespace App\Services;
 
 use App\Settings\GeneralSettings;
-use Illuminate\Support\Str;
+use Illuminate\Support\Facades\URL;
 
 /**
  * Service to handle proxy URL generation for channels and episodes.
@@ -38,12 +38,8 @@ class ProxyService
         if ($proxyUrlOverride && filter_var($proxyUrlOverride, FILTER_VALIDATE_URL)) {
             $url = rtrim($proxyUrlOverride, '/');
         } else {
-            // Manually construct base URL to ensure port is included (if not using HTTPS)
-            $url = rtrim(config('app.url'), '/');
-            $port = config('app.port');
-            if (! Str::contains($url, 'https') && $port) {
-                $url .= ':'.$port;
-            }
+            // Use `url('')` to get request aware URL, which respects the current request's scheme and host, and is more reliable in various environments (e.g., behind proxies, load balancers)
+            $url = url('');
         }
 
         // Set the base URL for the proxy service
@@ -58,44 +54,5 @@ class ProxyService
     public function getBaseUrl()
     {
         return $this->baseUrl;
-    }
-
-    /**
-     * Get the proxy URL for a channel
-     *
-     * @param  string|int  $id
-     * @param  string|null  $playlistUuid  Optional playlist UUID for context (e.g., merged playlists)
-     * @param  string|null  $username  Optional username for user-specific URLs
-     * @return string
-     */
-    public function getProxyUrlForChannel($id, $playlistUuid = null, $username = null)
-    {
-        $url = $this->baseUrl.'/api/m3u-proxy/channel/'.$id;
-        if ($playlistUuid) {
-            $url .= '/'.$playlistUuid;
-        }
-        if ($username) {
-            $url .= '?username='.urlencode($username);
-        }
-
-        return $url;
-    }
-
-    /**
-     * Get the proxy URL for an episode
-     *
-     * @param  string|int  $id
-     * @param  string|null  $playlistUuid  Optional playlist UUID for context (e.g., merged playlists)
-     * @return string
-     */
-    public function getProxyUrlForEpisode($id, $playlistUuid = null)
-    {
-        $url = $this->baseUrl.'/api/m3u-proxy/episode/'.$id;
-        if ($playlistUuid) {
-            $url .= '/'.$playlistUuid;
-        }
-
-        // Note: Username is now passed via X-Username header, not query param
-        return $url;
     }
 }

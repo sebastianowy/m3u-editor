@@ -3,6 +3,7 @@
 namespace App\Filament\Resources\Networks\Pages;
 
 use App\Filament\Resources\Networks\NetworkResource;
+use App\Filament\Resources\Playlists\PlaylistResource;
 use App\Models\Network;
 use App\Services\NetworkBroadcastService;
 use App\Services\NetworkScheduleService;
@@ -115,6 +116,7 @@ class EditNetwork extends EditRecord
                     ->modalDescription(fn (): string => 'This will generate a '.($this->record->schedule_window_days ?? 7).'-day programme schedule for this network. Existing future programmes will be replaced.')
                     ->disabled(fn (): bool => $this->record->network_playlist_id === null)
                     ->tooltip(fn (): ?string => $this->record->network_playlist_id === null ? 'Assign to a playlist first' : null)
+                    ->visible(fn (): bool => $this->record->schedule_type !== 'manual')
                     ->action(function () {
                         $service = app(NetworkScheduleService::class);
                         $service->generateSchedule($this->record);
@@ -132,7 +134,7 @@ class EditNetwork extends EditRecord
                     ->label('View Playlist')
                     ->icon('heroicon-o-eye')
                     ->visible(fn (Network $record): bool => $record->network_playlist_id !== null)
-                    ->url(fn (Network $record): string => \App\Filament\Resources\Playlists\PlaylistResource::getUrl('view', ['record' => $record->network_playlist_id])),
+                    ->url(fn (Network $record): string => PlaylistResource::getUrl('view', ['record' => $record->network_playlist_id])),
 
             ])->button(),
         ];

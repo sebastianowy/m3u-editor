@@ -1,9 +1,14 @@
 <?php
 
+use App\Jobs\FetchTmdbIds;
 use App\Jobs\SyncMediaServer;
 use App\Models\MediaServerIntegration;
+use App\Models\Playlist;
 use App\Models\User;
+use App\Services\LocalMediaService;
+use App\Services\TmdbService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\File;
 use Illuminate\Support\Facades\Queue;
 
 uses(RefreshDatabase::class);
@@ -208,6 +213,54 @@ it('returns custom video extensions when set', function () {
     expect($extensions)->not->toContain('avi');
 });
 
+it('uses library name as default genre for local movies', function () {
+    $basePath = '/tmp/test-media-genre-movies';
+    File::ensureDirectoryExists($basePath);
+    File::put($basePath.'/Test.Movie.2024.mkv', '');
+
+    $integration = MediaServerIntegration::create([
+        'name' => 'Local Media',
+        'type' => 'local',
+        'user_id' => $this->user->id,
+        'local_media_paths' => [
+            ['path' => $basePath, 'type' => 'movies', 'name' => 'Action'],
+        ],
+    ]);
+
+    $service = new LocalMediaService($integration);
+    $movies = $service->fetchMovies();
+
+    expect($movies)->toHaveCount(1);
+    expect($movies->first()['Genres'])->toBe(['Action']);
+
+    File::deleteDirectory($basePath);
+});
+
+it('uses library name as default genre for local series', function () {
+    $basePath = '/tmp/test-media-genre-series';
+    $seriesPath = $basePath.'/Breaking Bad/Season 1';
+
+    File::ensureDirectoryExists($seriesPath);
+    File::put($seriesPath.'/Breaking.Bad.S01E01.mkv', '');
+
+    $integration = MediaServerIntegration::create([
+        'name' => 'Local Media',
+        'type' => 'local',
+        'user_id' => $this->user->id,
+        'local_media_paths' => [
+            ['path' => $basePath, 'type' => 'tvshows', 'name' => 'Drama'],
+        ],
+    ]);
+
+    $service = new LocalMediaService($integration);
+    $series = $service->fetchSeries();
+
+    expect($series)->toHaveCount(1);
+    expect($series->first()['Genres'])->toBe(['Drama']);
+
+    File::deleteDirectory($basePath);
+});
+
 // Default Attributes Tests
 
 it('has correct default values for local media fields', function () {
@@ -283,12 +336,12 @@ it('resolves season number from md5 season id via filesystem scan', function () 
     $season2Dir = $seriesDir.'/Season 2';
 
     // Create directory structure with episode files
-    \Illuminate\Support\Facades\File::ensureDirectoryExists($season1Dir);
-    \Illuminate\Support\Facades\File::ensureDirectoryExists($season2Dir);
-    \Illuminate\Support\Facades\File::put($season1Dir.'/S01E01.mp4', '');
-    \Illuminate\Support\Facades\File::put($season2Dir.'/S02E01.mp4', '');
+    File::ensureDirectoryExists($season1Dir);
+    File::ensureDirectoryExists($season2Dir);
+    File::put($season1Dir.'/S01E01.mp4', '');
+    File::put($season2Dir.'/S02E01.mp4', '');
 
-    $service = new \App\Services\LocalMediaService($integration);
+    $service = new LocalMediaService($integration);
 
     // Use reflection to call the protected resolveSeasonNumber method
     $reflection = new ReflectionMethod($service, 'resolveSeasonNumber');
@@ -301,7 +354,7 @@ it('resolves season number from md5 season id via filesystem scan', function () 
     expect($reflection->invoke($service, $seriesDir, 'nonexistent-id'))->toBeNull();
 
     // Cleanup
-    \Illuminate\Support\Facades\File::deleteDirectory('/tmp/test-media-tv');
+    File::deleteDirectory('/tmp/test-media-tv');
 });
 
 it('filters episodes by season when md5 season id is provided', function () {
@@ -318,13 +371,13 @@ it('filters episodes by season when md5 season id is provided', function () {
     $season1Dir = $seriesDir.'/Season 1';
     $season2Dir = $seriesDir.'/Season 2';
 
-    \Illuminate\Support\Facades\File::ensureDirectoryExists($season1Dir);
-    \Illuminate\Support\Facades\File::ensureDirectoryExists($season2Dir);
-    \Illuminate\Support\Facades\File::put($season1Dir.'/The Wire S01E01 - The Target.mp4', '');
-    \Illuminate\Support\Facades\File::put($season1Dir.'/The Wire S01E02 - The Detail.mp4', '');
-    \Illuminate\Support\Facades\File::put($season2Dir.'/The Wire S02E01 - Ebb Tide.mp4', '');
+    File::ensureDirectoryExists($season1Dir);
+    File::ensureDirectoryExists($season2Dir);
+    File::put($season1Dir.'/The Wire S01E01 - The Target.mp4', '');
+    File::put($season1Dir.'/The Wire S01E02 - The Detail.mp4', '');
+    File::put($season2Dir.'/The Wire S02E01 - Ebb Tide.mp4', '');
 
-    $service = new \App\Services\LocalMediaService($integration);
+    $service = new LocalMediaService($integration);
 
     $seriesId = md5($seriesDir);
     $season1Id = md5($season1Dir);
@@ -345,7 +398,7 @@ it('filters episodes by season when md5 season id is provided', function () {
     expect($season2Episodes->first()['ParentIndexNumber'])->toBe(2);
 
     // Cleanup
-    \Illuminate\Support\Facades\File::deleteDirectory('/tmp/test-media-filter');
+    File::deleteDirectory('/tmp/test-media-filter');
 });
 
 it('returns all episodes when season id does not match any season', function () {
@@ -361,11 +414,11 @@ it('returns all episodes when season id does not match any season', function () 
     $seriesDir = '/tmp/test-media-nomatch/Lost';
     $season1Dir = $seriesDir.'/Season 1';
 
-    \Illuminate\Support\Facades\File::ensureDirectoryExists($season1Dir);
-    \Illuminate\Support\Facades\File::put($season1Dir.'/Lost S01E01 - Pilot.mp4', '');
-    \Illuminate\Support\Facades\File::put($season1Dir.'/Lost S01E02 - Tabula Rasa.mp4', '');
+    File::ensureDirectoryExists($season1Dir);
+    File::put($season1Dir.'/Lost S01E01 - Pilot.mp4', '');
+    File::put($season1Dir.'/Lost S01E02 - Tabula Rasa.mp4', '');
 
-    $service = new \App\Services\LocalMediaService($integration);
+    $service = new LocalMediaService($integration);
     $seriesId = md5($seriesDir);
 
     // When resolveSeasonNumber returns null (bad id), no filtering occurs
@@ -373,7 +426,7 @@ it('returns all episodes when season id does not match any season', function () 
     expect($episodes)->toHaveCount(2);
 
     // Cleanup
-    \Illuminate\Support\Facades\File::deleteDirectory('/tmp/test-media-nomatch');
+    File::deleteDirectory('/tmp/test-media-nomatch');
 });
 
 // Flat Structure Detection Tests
@@ -389,13 +442,13 @@ it('detects flat structure when video files exist without subdirectories', funct
     ]);
 
     $basePath = '/tmp/test-media-flat';
-    \Illuminate\Support\Facades\File::ensureDirectoryExists($basePath);
-    \Illuminate\Support\Facades\File::put($basePath.'/Breaking.Bad.S01E01.mp4', '');
-    \Illuminate\Support\Facades\File::put($basePath.'/The.Wire.S01E01.mkv', '');
-    \Illuminate\Support\Facades\File::put($basePath.'/Lost.S01E01.avi', '');
-    \Illuminate\Support\Facades\File::put($basePath.'/notes.txt', '');
+    File::ensureDirectoryExists($basePath);
+    File::put($basePath.'/Breaking.Bad.S01E01.mp4', '');
+    File::put($basePath.'/The.Wire.S01E01.mkv', '');
+    File::put($basePath.'/Lost.S01E01.avi', '');
+    File::put($basePath.'/notes.txt', '');
 
-    $service = new \App\Services\LocalMediaService($integration);
+    $service = new LocalMediaService($integration);
     $result = $service->detectFlatStructure($basePath);
 
     expect($result['has_flat_files'])->toBeTrue();
@@ -404,7 +457,7 @@ it('detects flat structure when video files exist without subdirectories', funct
     expect($result['sample_files'])->each->toBeString();
 
     // Cleanup
-    \Illuminate\Support\Facades\File::deleteDirectory($basePath);
+    File::deleteDirectory($basePath);
 });
 
 it('does not detect flat structure when series subdirectories exist', function () {
@@ -418,10 +471,10 @@ it('does not detect flat structure when series subdirectories exist', function (
     ]);
 
     $basePath = '/tmp/test-media-proper';
-    \Illuminate\Support\Facades\File::ensureDirectoryExists($basePath.'/Breaking Bad/Season 1');
-    \Illuminate\Support\Facades\File::put($basePath.'/Breaking Bad/Season 1/S01E01.mp4', '');
+    File::ensureDirectoryExists($basePath.'/Breaking Bad/Season 1');
+    File::put($basePath.'/Breaking Bad/Season 1/S01E01.mp4', '');
 
-    $service = new \App\Services\LocalMediaService($integration);
+    $service = new LocalMediaService($integration);
     $result = $service->detectFlatStructure($basePath);
 
     expect($result['has_flat_files'])->toBeFalse();
@@ -429,14 +482,14 @@ it('does not detect flat structure when series subdirectories exist', function (
     expect($result['sample_files'])->toBeEmpty();
 
     // Cleanup
-    \Illuminate\Support\Facades\File::deleteDirectory($basePath);
+    File::deleteDirectory($basePath);
 });
 
 it('returns warnings for series paths with flat structure', function () {
     $basePath = '/tmp/test-media-warn';
-    \Illuminate\Support\Facades\File::ensureDirectoryExists($basePath);
-    \Illuminate\Support\Facades\File::put($basePath.'/Breaking.Bad.S01E01.mp4', '');
-    \Illuminate\Support\Facades\File::put($basePath.'/The.Wire.S01E01.mkv', '');
+    File::ensureDirectoryExists($basePath);
+    File::put($basePath.'/Breaking.Bad.S01E01.mp4', '');
+    File::put($basePath.'/The.Wire.S01E01.mkv', '');
 
     $integration = MediaServerIntegration::create([
         'name' => 'Local TV',
@@ -447,7 +500,7 @@ it('returns warnings for series paths with flat structure', function () {
         ],
     ]);
 
-    $service = new \App\Services\LocalMediaService($integration);
+    $service = new LocalMediaService($integration);
     $warnings = $service->getSeriesPathWarnings();
 
     expect($warnings)->toBeArray();
@@ -457,13 +510,13 @@ it('returns warnings for series paths with flat structure', function () {
     expect($warnings[0])->toContain('Series Name/Season X/episode.mkv');
 
     // Cleanup
-    \Illuminate\Support\Facades\File::deleteDirectory($basePath);
+    File::deleteDirectory($basePath);
 });
 
 it('includes flat structure warning in testConnection response for series paths', function () {
     $basePath = '/tmp/test-media-conn';
-    \Illuminate\Support\Facades\File::ensureDirectoryExists($basePath);
-    \Illuminate\Support\Facades\File::put($basePath.'/Show.S01E01.mp4', '');
+    File::ensureDirectoryExists($basePath);
+    File::put($basePath.'/Show.S01E01.mp4', '');
 
     $integration = MediaServerIntegration::create([
         'name' => 'Local TV',
@@ -474,7 +527,7 @@ it('includes flat structure warning in testConnection response for series paths'
         ],
     ]);
 
-    $service = new \App\Services\LocalMediaService($integration);
+    $service = new LocalMediaService($integration);
     $result = $service->testConnection();
 
     expect($result['success'])->toBeTrue();
@@ -483,13 +536,13 @@ it('includes flat structure warning in testConnection response for series paths'
     expect($result['flat_structure_warnings'])->toHaveCount(1);
 
     // Cleanup
-    \Illuminate\Support\Facades\File::deleteDirectory($basePath);
+    File::deleteDirectory($basePath);
 });
 
 it('does not include flat structure warning when proper folder structure exists', function () {
     $basePath = '/tmp/test-media-ok';
-    \Illuminate\Support\Facades\File::ensureDirectoryExists($basePath.'/Breaking Bad/Season 1');
-    \Illuminate\Support\Facades\File::put($basePath.'/Breaking Bad/Season 1/S01E01.mp4', '');
+    File::ensureDirectoryExists($basePath.'/Breaking Bad/Season 1');
+    File::put($basePath.'/Breaking Bad/Season 1/S01E01.mp4', '');
 
     $integration = MediaServerIntegration::create([
         'name' => 'Local TV',
@@ -500,7 +553,7 @@ it('does not include flat structure warning when proper folder structure exists'
         ],
     ]);
 
-    $service = new \App\Services\LocalMediaService($integration);
+    $service = new LocalMediaService($integration);
     $result = $service->testConnection();
 
     expect($result['success'])->toBeTrue();
@@ -508,7 +561,7 @@ it('does not include flat structure warning when proper folder structure exists'
     expect($result['flat_structure_warnings'])->toBeEmpty();
 
     // Cleanup
-    \Illuminate\Support\Facades\File::deleteDirectory($basePath);
+    File::deleteDirectory($basePath);
 });
 
 // Auto Metadata Fetch Tests
@@ -535,10 +588,10 @@ it('can disable auto_fetch_metadata for local integrations', function () {
 });
 
 it('dispatches FetchTmdbIds job when auto_fetch_metadata is enabled and items synced', function () {
-    Queue::fake([\App\Jobs\FetchTmdbIds::class]);
+    Queue::fake([FetchTmdbIds::class]);
 
     // Mock TmdbService to return configured
-    $this->mock(\App\Services\TmdbService::class, function ($mock) {
+    $this->mock(TmdbService::class, function ($mock) {
         $mock->shouldReceive('isConfigured')->andReturn(true);
     });
 
@@ -552,8 +605,8 @@ it('dispatches FetchTmdbIds job when auto_fetch_metadata is enabled and items sy
         ]);
     });
 
-    $playlist = \App\Models\Playlist::withoutEvents(function () {
-        return \App\Models\Playlist::factory()->create([
+    $playlist = Playlist::withoutEvents(function () {
+        return Playlist::factory()->create([
             'user_id' => $this->user->id,
         ]);
     });
@@ -574,14 +627,14 @@ it('dispatches FetchTmdbIds job when auto_fetch_metadata is enabled and items sy
     $method = $reflection->getMethod('dispatchMetadataLookup');
     $method->invoke($job, $integration, $playlist);
 
-    Queue::assertPushed(\App\Jobs\FetchTmdbIds::class, function ($job) use ($playlist) {
+    Queue::assertPushed(FetchTmdbIds::class, function ($job) use ($playlist) {
         return $job->vodPlaylistId === $playlist->id
             && $job->seriesPlaylistId === $playlist->id;
     });
 });
 
 it('does not dispatch FetchTmdbIds job when auto_fetch_metadata is disabled', function () {
-    Queue::fake([\App\Jobs\FetchTmdbIds::class]);
+    Queue::fake([FetchTmdbIds::class]);
 
     // Use withoutEvents to prevent model observers from dispatching jobs
     $integration = MediaServerIntegration::withoutEvents(function () {
@@ -593,8 +646,8 @@ it('does not dispatch FetchTmdbIds job when auto_fetch_metadata is disabled', fu
         ]);
     });
 
-    $playlist = \App\Models\Playlist::withoutEvents(function () {
-        return \App\Models\Playlist::factory()->create([
+    $playlist = Playlist::withoutEvents(function () {
+        return Playlist::factory()->create([
             'user_id' => $this->user->id,
         ]);
     });
@@ -612,13 +665,13 @@ it('does not dispatch FetchTmdbIds job when auto_fetch_metadata is disabled', fu
     $method = $reflection->getMethod('dispatchMetadataLookup');
     $method->invoke($job, $integration, $playlist);
 
-    Queue::assertNotPushed(\App\Jobs\FetchTmdbIds::class);
+    Queue::assertNotPushed(FetchTmdbIds::class);
 });
 
 it('does not dispatch FetchTmdbIds job when no items were synced', function () {
-    Queue::fake([\App\Jobs\FetchTmdbIds::class]);
+    Queue::fake([FetchTmdbIds::class]);
 
-    $this->mock(\App\Services\TmdbService::class, function ($mock) {
+    $this->mock(TmdbService::class, function ($mock) {
         $mock->shouldReceive('isConfigured')->andReturn(true);
     });
 
@@ -632,8 +685,8 @@ it('does not dispatch FetchTmdbIds job when no items were synced', function () {
         ]);
     });
 
-    $playlist = \App\Models\Playlist::withoutEvents(function () {
-        return \App\Models\Playlist::factory()->create([
+    $playlist = Playlist::withoutEvents(function () {
+        return Playlist::factory()->create([
             'user_id' => $this->user->id,
         ]);
     });
@@ -651,13 +704,13 @@ it('does not dispatch FetchTmdbIds job when no items were synced', function () {
     $method = $reflection->getMethod('dispatchMetadataLookup');
     $method->invoke($job, $integration, $playlist);
 
-    Queue::assertNotPushed(\App\Jobs\FetchTmdbIds::class);
+    Queue::assertNotPushed(FetchTmdbIds::class);
 });
 
 it('does not dispatch FetchTmdbIds job for non-local integrations', function () {
-    Queue::fake([\App\Jobs\FetchTmdbIds::class]);
+    Queue::fake([FetchTmdbIds::class]);
 
-    $this->mock(\App\Services\TmdbService::class, function ($mock) {
+    $this->mock(TmdbService::class, function ($mock) {
         $mock->shouldReceive('isConfigured')->andReturn(true);
     });
 
@@ -673,8 +726,8 @@ it('does not dispatch FetchTmdbIds job for non-local integrations', function () 
         ]);
     });
 
-    $playlist = \App\Models\Playlist::withoutEvents(function () {
-        return \App\Models\Playlist::factory()->create([
+    $playlist = Playlist::withoutEvents(function () {
+        return Playlist::factory()->create([
             'user_id' => $this->user->id,
         ]);
     });
@@ -692,5 +745,48 @@ it('does not dispatch FetchTmdbIds job for non-local integrations', function () 
     $method = $reflection->getMethod('dispatchMetadataLookup');
     $method->invoke($job, $integration, $playlist);
 
-    Queue::assertNotPushed(\App\Jobs\FetchTmdbIds::class);
+    Queue::assertNotPushed(FetchTmdbIds::class);
+});
+
+it('dispatches FetchTmdbIds job for webdav integrations', function () {
+    Queue::fake([FetchTmdbIds::class]);
+
+    $this->mock(TmdbService::class, function ($mock) {
+        $mock->shouldReceive('isConfigured')->andReturn(true);
+    });
+
+    $integration = MediaServerIntegration::withoutEvents(function () {
+        return MediaServerIntegration::create([
+            'name' => 'WebDAV Server',
+            'type' => 'webdav',
+            'host' => 'webdav.local',
+            'port' => 80,
+            'user_id' => $this->user->id,
+            'auto_fetch_metadata' => true,
+        ]);
+    });
+
+    $playlist = Playlist::withoutEvents(function () {
+        return Playlist::factory()->create([
+            'user_id' => $this->user->id,
+        ]);
+    });
+
+    $job = new SyncMediaServer($integration->id);
+
+    $reflection = new ReflectionClass($job);
+    $statsProperty = $reflection->getProperty('stats');
+    $statsProperty->setValue($job, [
+        'movies_synced' => 4,
+        'series_synced' => 2,
+        'errors' => [],
+    ]);
+
+    $method = $reflection->getMethod('dispatchMetadataLookup');
+    $method->invoke($job, $integration, $playlist);
+
+    Queue::assertPushed(FetchTmdbIds::class, function ($job) use ($playlist) {
+        return $job->vodPlaylistId === $playlist->id
+            && $job->seriesPlaylistId === $playlist->id;
+    });
 });

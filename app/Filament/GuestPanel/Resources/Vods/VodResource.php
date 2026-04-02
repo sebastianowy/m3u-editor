@@ -8,6 +8,7 @@ use App\Filament\GuestPanel\Pages\Concerns\HasPlaylist;
 use App\Models\Channel;
 use App\Models\CustomPlaylist;
 use App\Models\Playlist;
+use App\Services\DateFormatService;
 use Filament\Actions\Action;
 use Filament\Actions\ViewAction;
 use Filament\Resources\Resource;
@@ -16,6 +17,7 @@ use Filament\Tables;
 use Filament\Tables\Enums\RecordActionsPosition;
 use Filament\Tables\Table;
 use Illuminate\Database\Eloquent\Builder;
+use Illuminate\Database\Eloquent\Model;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\HtmlString;
 use Illuminate\Support\Str;
@@ -48,8 +50,9 @@ class VodResource extends Resource
         array $parameters = [],
         bool $isAbsolute = true,
         ?string $panel = null,
-        ?\Illuminate\Database\Eloquent\Model $tenant = null,
-        bool $shouldGuessMissingParameters = false
+        ?Model $tenant = null,
+        bool $shouldGuessMissingParameters = false,
+        ?string $configuration = null
     ): string {
         $parameters['uuid'] = static::getCurrentUuid();
 
@@ -193,16 +196,18 @@ class VodResource extends Resource
                     ->label('Default URL')
                     ->sortable()
                     ->searchable(query: function (Builder $query, string $search): Builder {
-                        return $query->orWhereRaw('LOWER(channels.url::text) LIKE ?', ['%'.strtolower($search).'%']);
+                        $urlExpr = DB::getDriverName() === 'sqlite' ? 'channels.url' : 'channels.url::text';
+
+                        return $query->orWhereRaw("LOWER({$urlExpr}) LIKE ?", ['%'.strtolower($search).'%']);
                     })
                     ->toggleable(isToggledHiddenByDefault: true),
 
                 Tables\Columns\TextColumn::make('created_at')
-                    ->dateTime()
+                    ->formatStateUsing(fn ($state) => app(DateFormatService::class)->format($state))
                     ->sortable()
                     ->toggleable(isToggledHiddenByDefault: true),
                 Tables\Columns\TextColumn::make('updated_at')
-                    ->dateTime()
+                    ->formatStateUsing(fn ($state) => app(DateFormatService::class)->format($state))
                     ->sortable()
                     ->toggleable(isToggledHiddenByDefault: true),
             ])

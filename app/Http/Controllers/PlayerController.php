@@ -3,13 +3,14 @@
 namespace App\Http\Controllers;
 
 use Illuminate\Http\Request;
+use Illuminate\View\View;
 
 class PlayerController extends Controller
 {
     /**
      * Display the popout player view.
      *
-     * @return \Illuminate\View\View
+     * @return View
      */
     public function popout(Request $request)
     {
@@ -37,11 +38,26 @@ class PlayerController extends Controller
             $channelLogo = '';
         }
 
+        $contentType = (string) $request->query('content_type', '');
+        if (! in_array($contentType, ['live', 'vod', 'episode'], true)) {
+            $contentType = '';
+        }
+
+        $streamId = (int) $request->query('stream_id', 0);
+        $playlistId = (int) $request->query('playlist_id', 0);
+        $seriesId = (int) $request->query('series_id', 0);
+        $seasonNumber = (int) $request->query('season_number', 0);
+
         return view('player.popout', [
             'streamUrl' => $streamUrl,
             'streamFormat' => $streamFormat,
             'channelTitle' => (string) $request->query('title', 'Channel Player'),
             'channelLogo' => $channelLogo,
+            'contentType' => $contentType,
+            'streamId' => $streamId ?: null,
+            'playlistId' => $playlistId ?: null,
+            'seriesId' => $seriesId ?: null,
+            'seasonNumber' => $seasonNumber ?: null,
         ]);
     }
 }

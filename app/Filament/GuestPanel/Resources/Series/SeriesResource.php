@@ -8,6 +8,7 @@ use App\Filament\GuestPanel\Pages\Concerns\HasPlaylist;
 use App\Models\CustomPlaylist;
 use App\Models\Playlist;
 use App\Models\Series;
+use App\Services\DateFormatService;
 use Filament\Actions;
 use Filament\Resources\Resource;
 use Filament\Schemas\Schema;
@@ -15,6 +16,7 @@ use Filament\Tables;
 use Filament\Tables\Enums\RecordActionsPosition;
 use Filament\Tables\Table;
 use Illuminate\Database\Eloquent\Builder;
+use Illuminate\Database\Eloquent\Model;
 use Illuminate\Support\Str;
 
 class SeriesResource extends Resource
@@ -40,8 +42,9 @@ class SeriesResource extends Resource
         array $parameters = [],
         bool $isAbsolute = true,
         ?string $panel = null,
-        ?\Illuminate\Database\Eloquent\Model $tenant = null,
-        bool $shouldGuessMissingParameters = false
+        ?Model $tenant = null,
+        bool $shouldGuessMissingParameters = false,
+        ?string $configuration = null
     ): string {
         $parameters['uuid'] = static::getCurrentUuid();
 
@@ -146,11 +149,11 @@ class SeriesResource extends Resource
                     ->icon('heroicon-m-star')
                     ->sortable(),
                 Tables\Columns\TextColumn::make('created_at')
-                    ->dateTime()
+                    ->formatStateUsing(fn ($state) => app(DateFormatService::class)->format($state))
                     ->sortable()
                     ->toggleable(isToggledHiddenByDefault: true),
                 Tables\Columns\TextColumn::make('updated_at')
-                    ->dateTime()
+                    ->formatStateUsing(fn ($state) => app(DateFormatService::class)->format($state))
                     ->sortable()
                     ->toggleable(isToggledHiddenByDefault: true),
             ])

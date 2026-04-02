@@ -11,6 +11,8 @@ use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\BelongsToMany;
 use Illuminate\Database\Eloquent\Relations\HasManyThrough;
+use Illuminate\Database\Eloquent\Relations\MorphMany;
+use Illuminate\Database\Eloquent\Relations\MorphToMany;
 use Illuminate\Support\Facades\Cache;
 
 class PlaylistAlias extends Model
@@ -21,7 +23,6 @@ class PlaylistAlias extends Model
     protected $casts = [
         'xtream_config' => 'array',
         'proxy_options' => 'array',
-        'enabled' => 'boolean',
         'enable_proxy' => 'boolean',
         'priority' => 'integer',
         'expires_at' => 'datetime',
@@ -36,7 +37,11 @@ class PlaylistAlias extends Model
     protected function xtreamConfig(): Attribute
     {
         return Attribute::make(
-            get: function (string $value) {
+            get: function (?string $value) {
+                if ($value === null || $value === '') {
+                    return [];
+                }
+
                 $raw = json_decode($value, true);
 
                 // Legacy format: single config object stored as array with 'url' key.
@@ -174,6 +179,41 @@ class PlaylistAlias extends Model
         $effectivePlaylist = $this->getEffectivePlaylist();
 
         return $effectivePlaylist ? $effectivePlaylist->id_channel_by : PlaylistChannelId::ChannelId;
+    }
+
+    public function getIncludeVodInM3uAttribute(): bool
+    {
+        $effectivePlaylist = $this->getEffectivePlaylist();
+
+        return $effectivePlaylist ? (bool) $effectivePlaylist->include_vod_in_m3u : false;
+    }
+
+    public function getIncludeSeriesInM3uAttribute(): bool
+    {
+        $effectivePlaylist = $this->getEffectivePlaylist();
+
+        return $effectivePlaylist ? (bool) $effectivePlaylist->include_series_in_m3u : false;
+    }
+
+    public function getChannelStartAttribute(): int
+    {
+        $effectivePlaylist = $this->getEffectivePlaylist();
+
+        return $effectivePlaylist ? (int) ($effectivePlaylist->channel_start ?? 1) : 1;
+    }
+
+    public function getDummyEpgAttribute(): bool
+    {
+        $effectivePlaylist = $this->getEffectivePlaylist();
+
+        return $effectivePlaylist ? (bool) $effectivePlaylist->dummy_epg : false;
+    }
+
+    public function getDummyEpgCategoryAttribute(): bool
+    {
+        $effectivePlaylist = $this->getEffectivePlaylist();
+
+        return $effectivePlaylist ? (bool) $effectivePlaylist->dummy_epg_category : false;
     }
 
     /**
@@ -482,5 +522,18 @@ class PlaylistAlias extends Model
         }
 
         return $originalUrl;
+    }
+
+    /**
+     * PlaylistAuth assignments for this alias (polymorphic many-to-many).
+     */
+    public function playlistAuths(): MorphToMany
+    {
+        return $this->morphToMany(PlaylistAuth::class, 'authenticatable');
+    }
+
+    public function playlistViewers(): MorphMany
+    {
+        return $this->morphMany(PlaylistViewer::class, 'viewerable');
     }
 }

@@ -3,9 +3,15 @@
 namespace App\Filament\Resources\Users;
 
 use App\Models\User;
+use App\Services\DateFormatService;
 use BackedEnum;
 use Filament\Actions;
 use Filament\Forms;
+use Filament\Forms\Components\Select;
+use Filament\Forms\Components\Textarea;
+use Filament\Forms\Components\TextInput;
+use Filament\Forms\Components\Toggle;
+use Filament\Notifications\Notification;
 use Filament\Resources\Resource;
 use Filament\Schemas\Components\Fieldset;
 use Filament\Schemas\Schema;
@@ -14,6 +20,7 @@ use Filament\Tables;
 use Filament\Tables\Enums\RecordActionsPosition;
 use Filament\Tables\Table;
 use Illuminate\Database\Eloquent\Builder;
+use Illuminate\Database\Eloquent\Collection;
 use STS\FilamentImpersonate\Actions\Impersonate;
 
 class UserResource extends Resource
@@ -32,7 +39,7 @@ class UserResource extends Resource
     public static function getEloquentQuery(): Builder
     {
         $query = parent::getEloquentQuery()
-            ->where('email', '!=', config('dev.admin_emails')[0] ?? ''); // Hide primary admin user
+            ->where('is_admin', false); // Hide admin users from the list
 
         return $query;
     }
@@ -43,10 +50,10 @@ class UserResource extends Resource
     {
         return $schema
             ->components([
-                Forms\Components\TextInput::make('name')
+                TextInput::make('name')
                     ->label('Username')
                     ->required(),
-                Forms\Components\TextInput::make('email')
+                TextInput::make('email')
                     ->label('Email address')
                     ->email()
                     ->required(),
@@ -62,12 +69,18 @@ class UserResource extends Resource
                                 'use_integrations' => 'Allow this user to access media server integrations and related features',
                                 'use_tools' => 'Allow this user to access tools like API Tokens and Post Processing',
                                 'use_stream_file_sync' => 'Allow this user to access stream file sync features',
+                                'use_scrubber' => 'Allow this user to access the Channel Scrubber feature',
+                                'view_release_logs' => 'Allow this user to view release logs and the release logs page',
                             ])
                             ->columnSpanFull()
                             ->gridDirection('row')
                             ->columns(2),
                     ]),
-                Forms\Components\Toggle::make('update_password')
+                Toggle::make('must_change_password')
+                    ->label('Force password change on next login')
+                    ->helperText('When enabled, the user will be prompted to set a new password before they can use the application.')
+                    ->columnSpanFull(),
+                Toggle::make('update_password')
                     ->label('Update Password')
                     ->default(false)
                     ->live()
@@ -75,7 +88,7 @@ class UserResource extends Resource
                     ->dehydrated(false)
                     ->columnSpanFull(),
                 // Forms\Components\DateTimePicker::make('email_verified_at'),
-                Forms\Components\TextInput::make('password')
+                TextInput::make('password')
                     ->password()
                     ->revealable()
                     ->columnSpanFull()
@@ -113,11 +126,11 @@ class UserResource extends Resource
                 //     ->dateTime()
                 //     ->sortable(),
                 Tables\Columns\TextColumn::make('created_at')
-                    ->dateTime()
+                    ->formatStateUsing(fn ($state) => app(DateFormatService::class)->format($state))
                     ->sortable()
                     ->toggleable(isToggledHiddenByDefault: true),
                 Tables\Columns\TextColumn::make('updated_at')
-                    ->dateTime()
+                    ->formatStateUsing(fn ($state) => app(DateFormatService::class)->format($state))
                     ->sortable()
                     ->toggleable(isToggledHiddenByDefault: true),
                 // Tables\Columns\TextColumn::make('avatar_url')
@@ -127,17 +140,79 @@ class UserResource extends Resource
                 //
             ])
             ->recordActions([
-                Actions\DeleteAction::make()
-                    ->button()->hiddenLabel()->size('sm'),
+                Actions\ActionGroup::make([
+                    Actions\Action::make('notify')
+                        ->label('Notify User')
+                        ->icon('heroicon-o-bell-alert')
+                        ->modalIcon('heroicon-o-bell-alert')
+                        ->schema(self::getNotifySchema())
+                        ->action(function (User $record, array $data) {
+                            Notification::make()
+                                ->{$data['type']}()
+                                ->title($data['subject'])
+                                ->body($data['message'])
+                                ->broadcast($record)
+                                ->sendToDatabase($record);
+
+                            // See if sending to self to test notification
+                            if ($data['notify_self']) {
+                                Notification::make()
+                                    ->{$data['type']}()
+                                    ->title($data['subject'])
+                                    ->body($data['message'])
+                                    ->broadcast(auth()->user())
+                                    ->sendToDatabase(auth()->user());
+                            }
+                        })
+                        ->after(function (User $record, array $data) {
+                            Notification::make()
+                                ->success()
+                                ->title('Notifications Sent')
+                                ->body("Sent notification to {$record->name}.")
+                                ->send();
+                        }),
+                    Impersonate::make('Impersonate User')
+                        ->color('warning')
+                        ->tooltip('Login as this user'),
+                    Actions\DeleteAction::make(),
+                ])->button()->hiddenLabel()->size('sm'),
                 Actions\EditAction::make()
-                    ->button()->hiddenLabel()->size('sm'),
-                Impersonate::make('Impersonate User')
-                    ->color('warning')
-                    ->tooltip('Login as this user')
                     ->button()->hiddenLabel()->size('sm'),
             ], position: RecordActionsPosition::BeforeCells)
             ->toolbarActions([
                 Actions\BulkActionGroup::make([
+                    Actions\BulkAction::make('notify')
+                        ->label('Notify Users')
+                        ->icon('heroicon-o-bell-alert')
+                        ->modalIcon('heroicon-o-bell-alert')
+                        ->schema(self::getNotifySchema())
+                        ->action(function (Collection $records, array $data) {
+                            foreach ($records as $user) {
+                                Notification::make()
+                                    ->{$data['type']}()
+                                    ->title($data['subject'])
+                                    ->body($data['message'])
+                                    ->broadcast($user)
+                                    ->sendToDatabase($user);
+                            }
+
+                            // See if sending to self to test notification
+                            if ($data['notify_self']) {
+                                Notification::make()
+                                    ->{$data['type']}()
+                                    ->title($data['subject'])
+                                    ->body($data['message'])
+                                    ->broadcast(auth()->user())
+                                    ->sendToDatabase(auth()->user());
+                            }
+                        })
+                        ->after(function (Collection $records, array $data) {
+                            Notification::make()
+                                ->success()
+                                ->title('Notifications Sent')
+                                ->body("Sent notification to {$records->count()} users.")
+                                ->send();
+                        }),
                     Actions\DeleteBulkAction::make(),
                 ]),
             ]);
@@ -156,6 +231,34 @@ class UserResource extends Resource
             'index' => Pages\ListUsers::route('/'),
             // 'create' => Pages\CreateUser::route('/create'),
             // 'edit' => Pages\EditUser::route('/{record}/edit'),
+        ];
+    }
+
+    private static function getNotifySchema(): array
+    {
+        return [
+            TextInput::make('subject')
+                ->label('Notification Subject')
+                ->required()
+                ->maxLength(255),
+            Textarea::make('message')
+                ->label('Notification Message')
+                ->required()
+                ->maxLength(255),
+            Select::make('type')
+                ->label('Notification Type')
+                ->options([
+                    'info' => 'Info',
+                    'success' => 'Success',
+                    'warning' => 'Warning',
+                    'danger' => 'Danger',
+                ])
+                ->native(false)
+                ->default('info')
+                ->required(),
+            Toggle::make('notify_self')
+                ->label('Notify Myself')
+                ->helperText('Send the notification to yourself as well (for testing purposes)'),
         ];
     }
 }

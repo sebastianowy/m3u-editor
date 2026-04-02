@@ -22,10 +22,7 @@ class Backups extends BaseBackups
 
     protected ?string $subheading = 'NOTE: Restoring a backup will overwrite any existing data. Your manually uploaded EPG and Playlist files will NOT be restored. You will need to download the backup and manually re-upload where needed.';
 
-    public static function getNavigationSort(): ?int
-    {
-        return 2;
-    }
+    protected static ?int $navigationSort = 3;
 
     /**
      * Check if the user can access this page.
@@ -34,6 +31,11 @@ class Backups extends BaseBackups
     public static function canAccess(): bool
     {
         return auth()->check() && auth()->user()->isAdmin();
+    }
+
+    public static function getNavigationIcon(): string|\BackedEnum|null
+    {
+        return null;
     }
 
     protected function getActions(): array

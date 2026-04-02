@@ -6,7 +6,14 @@ use App\Facades\SortFacade;
 use App\Filament\Resources\Groups\Pages\EditGroup;
 use App\Filament\Resources\Groups\Pages\ListGroups;
 use App\Filament\Resources\Groups\RelationManagers\ChannelsRelationManager;
+use App\Jobs\GroupFindAndReplace;
+use App\Jobs\GroupFindAndReplaceReset;
+use App\Jobs\SyncPlexDvrJob;
+use App\Models\Channel;
 use App\Models\Group;
+use App\Models\Playlist;
+use App\Services\DateFormatService;
+use App\Services\FindReplaceService;
 use App\Services\PlaylistService;
 use App\Traits\HasUserFiltering;
 use Filament\Actions\Action;
@@ -131,11 +138,11 @@ class GroupResource extends Resource
                         '' => 'danger',
                     })->toggleable()->sortable(),
                 TextColumn::make('created_at')
-                    ->dateTime()
+                    ->formatStateUsing(fn ($state) => app(DateFormatService::class)->format($state))
                     ->sortable()
                     ->toggleable(isToggledHiddenByDefault: true),
                 TextColumn::make('updated_at')
-                    ->dateTime()
+                    ->formatStateUsing(fn ($state) => app(DateFormatService::class)->format($state))
                     ->sortable()
                     ->toggleable(isToggledHiddenByDefault: true),
             ])
@@ -272,11 +279,20 @@ class GroupResource extends Resource
 
                     Action::make('enable')
                         ->label('Enable group channels')
-                        ->action(function ($record): void {
+                        ->action(function (Group $record): void {
                             $record->channels()->update([
                                 'enabled' => true,
                             ]);
+
+                            $maxChannel = Channel::query()
+                                ->where('playlist_id', $record->playlist_id)
+                                ->where('group_id', '!=', $record->id)
+                                ->where('enabled', true)
+                                ->max('channel') ?? 0;
+
+                            SortFacade::bulkRecountGroupChannels($record, $maxChannel + 1);
                         })->after(function () {
+                            dispatch(new SyncPlexDvrJob(trigger: 'group_enable'));
                             Notification::make()
                                 ->success()
                                 ->title('Group channels enabled')
@@ -296,6 +312,7 @@ class GroupResource extends Resource
                                 'enabled' => false,
                             ]);
                         })->after(function () {
+                            dispatch(new SyncPlexDvrJob(trigger: 'group_disable'));
                             Notification::make()
                                 ->success()
                                 ->title('Group channels disabled')
@@ -309,7 +326,8 @@ class GroupResource extends Resource
                         ->modalDescription('Disable group channels now?')
                         ->modalSubmitActionLabel('Yes, disable now'),
                     DeleteAction::make()
-                        ->hidden(fn ($record) => ! $record->custom),
+                        ->hidden(fn ($record) => ! $record->custom)
+                        ->using(fn ($record) => $record->forceDelete()),
                 ])->button()->hiddenLabel()->size('sm'),
                 EditAction::make()
                     ->button()->hiddenLabel()->size('sm'),
@@ -384,8 +402,17 @@ class GroupResource extends Resource
                                 $record->channels()->update([
                                     'enabled' => true,
                                 ]);
+
+                                $maxChannel = Channel::query()
+                                    ->where('playlist_id', $record->playlist_id)
+                                    ->where('group_id', '!=', $record->id)
+                                    ->where('enabled', true)
+                                    ->max('channel') ?? 0;
+
+                                SortFacade::bulkRecountGroupChannels($record, $maxChannel + 1);
                             }
                         })->after(function () {
+                            dispatch(new SyncPlexDvrJob(trigger: 'group_bulk_enable'));
                             Notification::make()
                                 ->success()
                                 ->title('Selected group channels enabled')
@@ -407,6 +434,7 @@ class GroupResource extends Resource
                                 ]);
                             }
                         })->after(function () {
+                            dispatch(new SyncPlexDvrJob(trigger: 'group_bulk_disable'));
                             Notification::make()
                                 ->success()
                                 ->title('Selected group channels disabled')
@@ -428,6 +456,7 @@ class GroupResource extends Resource
                                 ]);
                             }
                         })->after(function () {
+                            dispatch(new SyncPlexDvrJob(trigger: 'group_bulk_enable_groups'));
                             Notification::make()
                                 ->success()
                                 ->title('Selected groups enabled')
@@ -450,6 +479,7 @@ class GroupResource extends Resource
                                 ]);
                             }
                         })->after(function () {
+                            dispatch(new SyncPlexDvrJob(trigger: 'group_bulk_disable_groups'));
                             Notification::make()
                                 ->success()
                                 ->title('Selected groups disabled')
@@ -498,6 +528,52 @@ class GroupResource extends Resource
                         ->requiresConfirmation()
                         ->modalIcon('heroicon-o-hashtag')
                         ->modalDescription('Recount channels across selected groups? This will renumber channels sequentially starting from the top-most selected group down to the bottom-most.'),
+                    BulkAction::make('find-replace')
+                        ->label('Find & Replace')
+                        ->schema(fn () => FindReplaceService::getBulkActionSchema('groups'))
+                        ->action(function (Collection $records, array $data): void {
+                            app('Illuminate\Contracts\Bus\Dispatcher')
+                                ->dispatch(new GroupFindAndReplace(
+                                    user_id: auth()->id(),
+                                    use_regex: $data['use_regex'] ?? true,
+                                    find_replace: $data['find_replace'] ?? '',
+                                    replace_with: $data['replace_with'] ?? '',
+                                    groups: $records,
+                                ));
+                        })->after(function () {
+                            Notification::make()
+                                ->success()
+                                ->title('Find & Replace started')
+                                ->body('Find & Replace working in the background. You will be notified once the process is complete.')
+                                ->send();
+                        })
+                        ->requiresConfirmation()
+                        ->icon('heroicon-o-magnifying-glass')
+                        ->color('gray')
+                        ->modalIcon('heroicon-o-magnifying-glass')
+                        ->modalDescription('Select what you would like to find and replace in the selected group names.')
+                        ->modalSubmitActionLabel('Replace now'),
+                    BulkAction::make('find-replace-reset')
+                        ->label('Undo Find & Replace')
+                        ->action(function (Collection $records): void {
+                            app('Illuminate\Contracts\Bus\Dispatcher')
+                                ->dispatch(new GroupFindAndReplaceReset(
+                                    user_id: auth()->id(),
+                                    groups: $records,
+                                ));
+                        })->after(function () {
+                            Notification::make()
+                                ->success()
+                                ->title('Find & Replace reset started')
+                                ->body('Find & Replace reset working in the background. You will be notified once the process is complete.')
+                                ->send();
+                        })
+                        ->requiresConfirmation()
+                        ->icon('heroicon-o-arrow-uturn-left')
+                        ->color('warning')
+                        ->modalIcon('heroicon-o-arrow-uturn-left')
+                        ->modalDescription('Reset group names back to their original imported values? This will undo any find & replace changes.')
+                        ->modalSubmitActionLabel('Reset now'),
                 ]),
             ]);
     }

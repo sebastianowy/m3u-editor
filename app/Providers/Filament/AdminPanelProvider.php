@@ -34,12 +34,11 @@ use Filament\View\PanelsRenderHook;
 use Filament\Widgets\AccountWidget;
 use Illuminate\Cookie\Middleware\AddQueuedCookiesToResponse;
 use Illuminate\Cookie\Middleware\EncryptCookies;
-use Illuminate\Foundation\Http\Middleware\VerifyCsrfToken;
+use Illuminate\Foundation\Http\Middleware\PreventRequestForgery;
 use Illuminate\Routing\Middleware\SubstituteBindings;
 use Illuminate\Session\Middleware\StartSession;
 use Illuminate\Support\Facades\Blade;
 use Illuminate\View\Middleware\ShareErrorsFromSession;
-use Saade\FilamentLaravelLog\FilamentLaravelLogPlugin;
 use ShuvroRoy\FilamentSpatieLaravelBackup\FilamentSpatieLaravelBackupPlugin;
 
 class AdminPanelProvider extends PanelProvider
@@ -114,17 +113,19 @@ class AdminPanelProvider extends PanelProvider
             ])
             ->navigationItems([
                 NavigationItem::make('API Docs')
+                    ->label('API Docs ↗')
                     ->url('/docs/api', shouldOpenInNewTab: true)
                     ->group('Tools')
                     ->sort(sort: 9)
                     ->icon(null)
-                    ->visible(fn (): bool => in_array(auth()->user()->email, config('dev.admin_emails'), true)),
+                    ->visible(fn (): bool => auth()->user()->isAdmin()),
                 NavigationItem::make('Queue Manager')
+                    ->label('Queue Manager ↗')
                     ->url('/horizon', shouldOpenInNewTab: true)
                     ->group('Tools')
                     ->sort(10)
                     ->icon(null)
-                    ->visible(fn (): bool => in_array(auth()->user()->email, config('dev.admin_emails'), true)),
+                    ->visible(fn (): bool => auth()->user()->isAdmin()),
             ])
             ->breadcrumbs($settings['show_breadcrumbs'])
             ->widgets([
@@ -141,20 +142,8 @@ class AdminPanelProvider extends PanelProvider
             ])
             ->plugins([
                 FilamentSpatieLaravelBackupPlugin::make()
-                    ->authorize(fn (): bool => in_array(auth()->user()->email, config('dev.admin_emails'), true))
+                    ->authorize(fn (): bool => auth()->user()->isAdmin())
                     ->usingPage(Backups::class),
-                FilamentLaravelLogPlugin::make()
-                    ->authorize(fn (): bool => in_array(auth()->user()->email, config('dev.admin_emails'), true))
-                    ->navigationGroup('Tools')
-                    ->navigationLabel('Logs')
-                    ->navigationIcon(null)
-                    ->activeNavigationIcon(null)
-                    ->navigationSort(6)
-                    ->title('Application Logs')
-                    ->slug('logs')
-                    ->logDirs([
-                        config('app.log.dir'),
-                    ]),
             ])
             ->maxContentWidth($settings['content_width'])
             ->middleware([
@@ -164,7 +153,7 @@ class AdminPanelProvider extends PanelProvider
                 DashboardMiddleware::class, // Needs to be after StartSession
                 AuthenticateSession::class,
                 ShareErrorsFromSession::class,
-                VerifyCsrfToken::class,
+                PreventRequestForgery::class,
                 SubstituteBindings::class,
                 DisableBladeIconComponents::class,
                 DispatchServingFilamentEvent::class,
@@ -200,6 +189,20 @@ class AdminPanelProvider extends PanelProvider
                 fn (): string => view('components.external-ip-display')->render()
             );
         }
+
+        // Register OIDC SSO button on the login page
+        if (config('services.oidc.enabled')) {
+            FilamentView::registerRenderHook(
+                PanelsRenderHook::AUTH_LOGIN_FORM_AFTER,
+                fn (): string => view('filament.auth.oidc-login-button')->render(),
+            );
+        }
+
+        // Force password change modal — shown to any authenticated user with must_change_password = true
+        FilamentView::registerRenderHook(
+            PanelsRenderHook::BODY_START,
+            fn (): string => auth()->check() ? Blade::render("@livewire('force-password-change')") : ''
+        );
 
         // Register our custom app js
         FilamentView::registerRenderHook('panels::body.end', fn () => Blade::render("@vite('resources/js/app.js')"));

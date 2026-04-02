@@ -15,6 +15,7 @@ use App\Models\Playlist;
 use App\Models\Series;
 use App\Services\TmdbService;
 use App\Settings\GeneralSettings;
+use App\Traits\RenderlessColumnUpdates;
 use Filament\Actions\Action;
 use Filament\Actions\ActionGroup;
 use Filament\Forms\Components\Select;
@@ -22,16 +23,28 @@ use Filament\Forms\Components\TextInput;
 use Filament\Forms\Components\Toggle;
 use Filament\Notifications\Notification;
 use Filament\Resources\Pages\ListRecords;
+use Filament\Schemas\Components\EmbeddedTable;
+use Filament\Schemas\Components\RenderHook;
 use Filament\Schemas\Components\Tabs\Tab;
 use Filament\Schemas\Components\Utilities\Get;
+use Filament\Schemas\Components\Utilities\Set;
+use Filament\Schemas\Components\View;
+use Filament\Schemas\Schema;
+use Filament\View\PanelsRenderHook;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Support\Facades\Log;
+use Livewire\Attributes\Url;
 
 class ListSeries extends ListRecords
 {
+    use RenderlessColumnUpdates;
+
     protected static string $resource = SeriesResource::class;
 
     protected ?string $subheading = 'Only enabled series will be automatically updated on Playlist sync, this includes fetching episodes and metadata. You can also manually sync series to update episodes and metadata.';
+
+    #[Url(as: 'status')]
+    public ?string $statusFilter = 'all';
 
     protected function getHeaderActions(): array
     {
@@ -222,50 +235,86 @@ class ListSeries extends ListRecords
                     ->modalSubmitActionLabel('Yes, sync now'),
                 Action::make('find-replace')
                     ->label('Find & Replace')
-                    ->schema([
-                        Toggle::make('all_series')
-                            ->label('All Series')
-                            ->live()
-                            ->helperText('Apply find and replace to all Series? If disabled, it will only apply to the selected Series.')
-                            ->default(true),
-                        Select::make('series')
-                            ->label('Series')
-                            ->required()
-                            ->helperText('Select the Series you would like to apply changes to.')
-                            ->options(Series::where(['user_id' => auth()->id()])->get(['name', 'id'])->pluck('name', 'id'))
-                            ->hidden(fn (Get $get) => $get('all_series') === true)
-                            ->searchable(),
-                        Toggle::make('use_regex')
-                            ->label('Use Regex')
-                            ->live()
-                            ->helperText('Use regex patterns to find and replace. If disabled, will use direct string comparison.')
-                            ->default(true),
-                        Select::make('column')
-                            ->label('Column to modify')
-                            ->options([
-                                'name' => 'Series Name',
-                                'genre' => 'Genre',
-                                'plot' => 'Plot',
-                            ])
-                            ->default('name')
-                            ->required()
-                            ->columnSpan(1),
-                        TextInput::make('find_replace')
-                            ->label(fn (Get $get) => ! $get('use_regex') ? 'String to replace' : 'Pattern to replace')
-                            ->required()
-                            ->placeholder(
-                                fn (Get $get) => $get('use_regex')
-                                    ? '^(US- |UK- |CA- )'
-                                    : 'US -'
-                            )->helperText(
-                                fn (Get $get) => ! $get('use_regex')
-                                    ? 'This is the string you want to find and replace.'
-                                    : 'This is the regex pattern you want to find. Make sure to use valid regex syntax.'
-                            ),
-                        TextInput::make('replace_with')
-                            ->label('Replace with (optional)')
-                            ->placeholder('Leave empty to remove'),
-                    ])
+                    ->schema(function (): array {
+                        $savedPatterns = [];
+                        $savedPatternRules = [];
+                        $counter = 0;
+                        foreach (Playlist::where('user_id', auth()->id())->get() as $playlist) {
+                            foreach ($playlist->find_replace_rules ?? [] as $rule) {
+                                if (is_array($rule) && ($rule['target'] ?? 'channels') === 'series') {
+                                    $savedPatterns[$counter] = "{$playlist->name} - ".($rule['name'] ?? 'Unnamed');
+                                    $savedPatternRules[$counter] = $rule;
+                                    $counter++;
+                                }
+                            }
+                        }
+
+                        return [
+                            Select::make('saved_pattern')
+                                ->label('Load saved pattern')
+                                ->searchable()
+                                ->placeholder('Select a saved pattern...')
+                                ->options($savedPatterns)
+                                ->hidden(empty($savedPatterns))
+                                ->live()
+                                ->afterStateUpdated(function (?string $state, Set $set) use ($savedPatternRules): void {
+                                    if ($state === null || $state === '') {
+                                        return;
+                                    }
+                                    $rule = $savedPatternRules[(int) $state] ?? null;
+                                    if (! $rule) {
+                                        return;
+                                    }
+                                    $set('use_regex', $rule['use_regex'] ?? true);
+                                    $set('column', $rule['column'] ?? 'name');
+                                    $set('find_replace', $rule['find_replace'] ?? '');
+                                    $set('replace_with', $rule['replace_with'] ?? '');
+                                })
+                                ->dehydrated(false),
+                            Toggle::make('all_series')
+                                ->label('All Series')
+                                ->live()
+                                ->helperText('Apply find and replace to all Series? If disabled, it will only apply to the selected Series.')
+                                ->default(true),
+                            Select::make('series')
+                                ->label('Series')
+                                ->required()
+                                ->helperText('Select the Series you would like to apply changes to.')
+                                ->options(Series::where(['user_id' => auth()->id()])->get(['name', 'id'])->pluck('name', 'id'))
+                                ->hidden(fn (Get $get) => $get('all_series') === true)
+                                ->searchable(),
+                            Toggle::make('use_regex')
+                                ->label('Use Regex')
+                                ->live()
+                                ->helperText('Use regex patterns to find and replace. If disabled, will use direct string comparison.')
+                                ->default(true),
+                            Select::make('column')
+                                ->label('Column to modify')
+                                ->options([
+                                    'name' => 'Series Name',
+                                    'genre' => 'Genre',
+                                    'plot' => 'Plot',
+                                ])
+                                ->default('name')
+                                ->required()
+                                ->columnSpan(1),
+                            TextInput::make('find_replace')
+                                ->label(fn (Get $get) => ! $get('use_regex') ? 'String to replace' : 'Pattern to replace')
+                                ->required()
+                                ->placeholder(
+                                    fn (Get $get) => $get('use_regex')
+                                        ? '^(US- |UK- |CA- )'
+                                        : 'US -'
+                                )->helperText(
+                                    fn (Get $get) => ! $get('use_regex')
+                                        ? 'This is the string you want to find and replace.'
+                                        : 'This is the regex pattern you want to find. Make sure to use valid regex syntax.'
+                                ),
+                            TextInput::make('replace_with')
+                                ->label('Replace with (optional)')
+                                ->placeholder('Leave empty to remove'),
+                        ];
+                    })
                     ->action(function (array $data): void {
                         app('Illuminate\Contracts\Bus\Dispatcher')
                             ->dispatch(new SeriesFindAndReplace(
@@ -305,7 +354,23 @@ class ListSeries extends ListRecords
 
     public function getTabs(): array
     {
-        return self::setupTabs();
+        $playlists = Playlist::where('user_id', auth()->id())->orderBy('name')->get();
+
+        $playlistCounts = Series::where('user_id', auth()->id())
+            ->whereIn('playlist_id', $playlists->pluck('id'))
+            ->groupBy('playlist_id')
+            ->selectRaw('playlist_id, count(*) as aggregate')
+            ->pluck('aggregate', 'playlist_id');
+
+        return [
+            'all' => Tab::make('All Playlists')
+                ->badge($playlistCounts->sum()),
+            ...($playlists->mapWithKeys(fn (Playlist $playlist) => [
+                'playlist_'.$playlist->id => Tab::make($playlist->name)
+                    ->modifyQueryUsing(fn ($query) => $query->where('playlist_id', $playlist->id))
+                    ->badge($playlistCounts->get($playlist->id, 0)),
+            ])->toArray()),
+        ];
     }
 
     public static function setupTabs($relationId = null): array
@@ -314,7 +379,6 @@ class ListSeries extends ListRecords
             ['user_id', auth()->id()],
         ];
 
-        // Change count based on view
         $totalCount = Series::query()
             ->where($where)
             ->when($relationId, function ($query, $relationId) {
@@ -329,21 +393,78 @@ class ListSeries extends ListRecords
                 return $query->where('category_id', $relationId);
             })->count();
 
-        // Return tabs
         return [
             'all' => Tab::make('All Series')
                 ->badge($totalCount),
             'enabled' => Tab::make('Enabled')
-                // ->icon('heroicon-m-check')
                 ->badgeColor('success')
                 ->modifyQueryUsing(fn ($query) => $query->where('enabled', true))
                 ->badge($enabledCount),
             'disabled' => Tab::make('Disabled')
-                // ->icon('heroicon-m-x-mark')
                 ->badgeColor('danger')
                 ->modifyQueryUsing(fn ($query) => $query->where('enabled', false))
                 ->badge($disabledCount),
         ];
+    }
+
+    public function content(Schema $schema): Schema
+    {
+        return $schema->components([
+            $this->getTabsContentComponent(),
+            View::make('filament.series.status-tabs'),
+            RenderHook::make(PanelsRenderHook::RESOURCE_PAGES_LIST_RECORDS_TABLE_BEFORE),
+            EmbeddedTable::make(),
+            RenderHook::make(PanelsRenderHook::RESOURCE_PAGES_LIST_RECORDS_TABLE_AFTER),
+        ]);
+    }
+
+    protected function modifyQueryWithActiveTab(Builder $query, bool $isResolvingRecord = false): Builder
+    {
+        $query = parent::modifyQueryWithActiveTab($query, $isResolvingRecord);
+
+        return match ($this->statusFilter) {
+            'enabled' => $query->where('enabled', true),
+            'disabled' => $query->where('enabled', false),
+            default => $query,
+        };
+    }
+
+    /**
+     * @return array<string, int>
+     */
+    public function getStatusTabCounts(): array
+    {
+        $baseQuery = Series::query()
+            ->where('user_id', auth()->id());
+
+        $activeTab = $this->activeTab;
+        if ($activeTab && $activeTab !== 'all') {
+            $tabs = $this->getCachedTabs();
+            if (isset($tabs[$activeTab])) {
+                $baseQuery = $tabs[$activeTab]->modifyQuery($baseQuery);
+            }
+        }
+
+        $counts = (clone $baseQuery)
+            ->selectRaw('count(*) as all_count, sum(case when enabled then 1 else 0 end) as enabled_count, sum(case when not enabled then 1 else 0 end) as disabled_count')
+            ->first();
+
+        return [
+            'all' => (int) ($counts->all_count ?? 0),
+            'enabled' => (int) ($counts->enabled_count ?? 0),
+            'disabled' => (int) ($counts->disabled_count ?? 0),
+        ];
+    }
+
+    public function updatedActiveTab(): void
+    {
+        parent::updatedActiveTab();
+        $this->statusFilter = 'all';
+    }
+
+    public function updatedStatusFilter(): void
+    {
+        $this->resetPage();
     }
 
     public function applyTmdbSelection(int $tmdbId, string $type, ?int $recordId, string $recordType): void

@@ -5,6 +5,7 @@ namespace App\Models;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Database\Eloquent\Relations\HasManyThrough;
 
 class MediaServerIntegration extends Model
@@ -40,6 +41,7 @@ class MediaServerIntegration extends Model
         'metadata_source' => 'tmdb',
         'auto_fetch_metadata' => true,
         'scan_recursive' => true,
+        'plex_management_enabled' => false,
     ];
 
     /**
@@ -70,6 +72,8 @@ class MediaServerIntegration extends Model
         'video_extensions' => 'array',
         'scan_recursive' => 'boolean',
         'auto_fetch_metadata' => 'boolean',
+        'plex_management_enabled' => 'boolean',
+        'plex_dvr_tuners' => 'array',
     ];
 
     /**
@@ -79,6 +83,8 @@ class MediaServerIntegration extends Model
      */
     protected $hidden = [
         'api_key',
+        'webdav_username',
+        'webdav_password',
     ];
 
     /**
@@ -171,12 +177,29 @@ class MediaServerIntegration extends Model
     }
 
     /**
+     * Check if this is a WebDAV media integration.
+     */
+    public function isWebDav(): bool
+    {
+        return $this->type === 'webdav';
+    }
+
+    /**
      * Check if this integration requires network connectivity.
      * Local media does not require network connectivity.
      */
     public function requiresNetwork(): bool
     {
         return ! $this->isLocal();
+    }
+
+    /**
+     * Check if this integration uses local-style path configuration.
+     * Both local and webdav use the same path configuration structure.
+     */
+    public function usesLocalPathConfig(): bool
+    {
+        return $this->isLocal() || $this->isWebDav();
     }
 
     /**
@@ -212,7 +235,7 @@ class MediaServerIntegration extends Model
     /**
      * Get networks associated with this integration.
      */
-    public function networks(): \Illuminate\Database\Eloquent\Relations\HasMany
+    public function networks(): HasMany
     {
         return $this->hasMany(Network::class);
     }

@@ -14,6 +14,7 @@ use App\Forms\Components\XtreamApiInfo;
 use App\Models\MergedPlaylist;
 use App\Models\PlaylistAuth;
 use App\Models\StreamProfile;
+use App\Services\DateFormatService;
 use App\Services\EpgCacheService;
 use App\Traits\HasUserFiltering;
 use Filament\Actions\Action;
@@ -117,11 +118,11 @@ class MergedPlaylistResource extends Resource
                     ->hidden(fn () => ! auth()->user()->canUseProxy())
                     ->sortable(),
                 TextColumn::make('created_at')
-                    ->dateTime()
+                    ->formatStateUsing(fn ($state) => app(DateFormatService::class)->format($state))
                     ->sortable()
                     ->toggleable(isToggledHiddenByDefault: true),
                 TextColumn::make('updated_at')
-                    ->dateTime()
+                    ->formatStateUsing(fn ($state) => app(DateFormatService::class)->format($state))
                     ->sortable()
                     ->toggleable(isToggledHiddenByDefault: true),
             ])
@@ -316,24 +317,23 @@ class MergedPlaylistResource extends Resource
                         ->type('number')
                         ->default(1) // Default to 1 stream
                         ->required(),
-                    TextInput::make('available_streams')
-                        ->label('Available Streams')
-                        ->hint('Set to 0 for unlimited streams.')
-                        ->helperText('Number of streams available for this provider. If set to a value other than 0, will prevent any streams from starting if the number of active streams exceeds this value.')
-                        ->columnSpan(1)
-                        ->rules(['min:1'])
-                        ->type('number')
-                        ->default(0) // Default to 0 streams (for unlimted)
-                        ->required()
-                        ->hidden(fn (Get $get): bool => ! $get('enable_proxy')),
+                    TextInput::make('server_timezone')
+                        ->label('Provider Timezone')
+                        ->helperText('The portal/provider timezone (DST-aware). Needed to correctly use timeshift functionality.')
+                        ->placeholder('Etc/UTC'),
 
                     Grid::make()
                         ->columns(3)
                         ->schema([
-                            TextInput::make('server_timezone')
-                                ->label('Provider Timezone')
-                                ->helperText('The portal/provider timezone (DST-aware). Needed to correctly use timeshift functionality when playlist proxy is enabled.')
-                                ->placeholder('Etc/UTC'),
+                            TextInput::make('available_streams')
+                                ->label('Available Streams')
+                                ->hint('Set to 0 for unlimited streams.')
+                                ->helperText('Number of streams available for this provider. If set to a value other than 0, will prevent any streams from starting if the number of active streams exceeds this value.')
+                                ->columnSpan(1)
+                                ->rules(['min:1'])
+                                ->type('number')
+                                ->default(0) // Default to 0 streams (for unlimted)
+                                ->required(),
                             Toggle::make('strict_live_ts')
                                 ->label('Enable Strict Live TS Handling')
                                 ->hintAction(

@@ -18,6 +18,11 @@ class ViewVod extends ViewRecord
         return $this->record->title_custom ?? $this->record->title ?? $this->record->name;
     }
 
+    public function getAuth(): ?array
+    {
+        return null; // No auth for VODs in the admin panel, will use admin auth
+    }
+
     public function getSubheading(): string|Htmlable|null
     {
         $parts = [];
@@ -73,8 +78,11 @@ class ViewVod extends ViewRecord
                 ->color('primary')
                 ->dispatch('openFloatingStream', [[
                     'id' => $this->record->id,
+                    'stream_id' => $this->record->id,
+                    'content_type' => 'vod',
+                    'playlist_id' => $this->record->playlist_id,
                     'title' => $this->record->title_custom ?? $this->record->title ?? $this->record->name,
-                    'url' => route('m3u-proxy.channel.player', ['id' => $this->record->id]),
+                    'url' => $this->record->getProxyUrl(internal: true),
                     'format' => $this->record->container_extension ?? 'ts',
                     'type' => 'channel',
                 ]]),

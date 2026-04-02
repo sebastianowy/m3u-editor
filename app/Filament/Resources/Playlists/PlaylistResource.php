@@ -25,6 +25,7 @@ use App\Livewire\PlaylistEpgUrl;
 use App\Livewire\PlaylistInfo;
 use App\Livewire\PlaylistM3uUrl;
 use App\Livewire\XtreamApiInfo;
+use App\Livewire\XtreamDnsStatus;
 use App\Models\Group;
 use App\Models\MediaServerIntegration;
 use App\Models\Playlist;
@@ -36,9 +37,11 @@ use App\Models\StreamProfile;
 use App\Rules\CheckIfUrlOrLocalPath;
 use App\Rules\Cron;
 use App\Rules\UrlIsAllowed;
+use App\Services\DateFormatService;
 use App\Services\EpgCacheService;
 use App\Services\M3uProxyService;
 use App\Services\ProfileService;
+use App\Tables\Columns\ProgressColumn;
 use App\Traits\HasUserFiltering;
 use Carbon\Carbon;
 use Cron\CronExpression;
@@ -52,7 +55,6 @@ use Filament\Actions\DeleteBulkAction;
 use Filament\Actions\EditAction;
 use Filament\Actions\ViewAction;
 use Filament\Forms\Components\CheckboxList;
-use Filament\Forms\Components\DateTimePicker;
 use Filament\Forms\Components\FileUpload;
 use Filament\Forms\Components\ModalTableSelect;
 use Filament\Forms\Components\Placeholder;
@@ -88,7 +90,6 @@ use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\HtmlString;
 use Illuminate\Validation\Rule;
-use RyanChandler\FilamentProgressColumn\ProgressColumn;
 
 class PlaylistResource extends Resource
 {
@@ -169,7 +170,7 @@ class PlaylistResource extends Resource
                                 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor" class="size-4">
                                     <path d="M3 3.5A1.5 1.5 0 0 1 4.5 2h1.879a1.5 1.5 0 0 1 1.06.44l1.122 1.12A1.5 1.5 0 0 0 9.62 4H11.5A1.5 1.5 0 0 1 13 5.5v1H3v-3ZM3.081 8a1.5 1.5 0 0 0-1.423 1.974l1 3A1.5 1.5 0 0 0 4.081 14h7.838a1.5 1.5 0 0 0 1.423-1.026l1-3A1.5 1.5 0 0 0 12.919 8H3.081Z" />
                                 </svg>
-                                <a class="inline m-0 p-0 hover:underline" href="'.$integrationLink.'">Local Media: '.$integration->name.'</a>
+                                Local Media: '.$integration->name.'
                             </div>');
                         }
                         if (in_array($record->source_type, [PlaylistSourceType::Emby, PlaylistSourceType::Jellyfin])) {
@@ -182,7 +183,7 @@ class PlaylistResource extends Resource
                                     <path d="M4.464 3.162A2 2 0 0 1 6.28 2h7.44a2 2 0 0 1 1.816 1.162l1.154 2.5c.067.145.115.291.145.438A3.508 3.508 0 0 0 16 6H4c-.288 0-.568.035-.835.1.03-.147.078-.293.145-.438l1.154-2.5Z" />
                                     <path fill-rule="evenodd" d="M2 9.5a2 2 0 0 1 2-2h12a2 2 0 1 1 0 4H4a2 2 0 0 1-2-2Zm13.24 0a.75.75 0 0 1 .75-.75H16a.75.75 0 0 1 .75.75v.01a.75.75 0 0 1-.75.75h-.01a.75.75 0 0 1-.75-.75V9.5Zm-2.25-.75a.75.75 0 0 0-.75.75v.01c0 .414.336.75.75.75H13a.75.75 0 0 0 .75-.75V9.5a.75.75 0 0 0-.75-.75h-.01ZM2 15a2 2 0 0 1 2-2h12a2 2 0 1 1 0 4H4a2 2 0 0 1-2-2Zm13.24 0a.75.75 0 0 1 .75-.75H16a.75.75 0 0 1 .75.75v.01a.75.75 0 0 1-.75.75h-.01a.75.75 0 0 1-.75-.75V15Zm-2.25-.75a.75.75 0 0 0-.75.75v.01c0 .414.336.75.75.75H13a.75.75 0 0 0 .75-.75V15a.75.75 0 0 0-.75-.75h-.01Z" clip-rule="evenodd" />
                                 </svg>
-                                <a class="inline m-0 p-0 hover:underline" href="'.$integrationLink.'">Integration: '.$integration->name.'</a>
+                                Integration: '.$integration->name.'
                             </div>');
                         }
                     })
@@ -310,7 +311,7 @@ class PlaylistResource extends Resource
                     ->sortable(),
                 TextColumn::make('synced')
                     ->label('Last Synced')
-                    ->since()
+                    ->formatStateUsing(fn ($state) => app(DateFormatService::class)->format($state))
                     ->toggleable()
                     ->sortable(),
                 TextColumn::make('sync_interval')
@@ -318,7 +319,7 @@ class PlaylistResource extends Resource
                     ->toggleable()
                     ->formatStateUsing(function ($state, $record) {
                         if ($record->auto_sync && $record->sync_interval && CronExpression::isValidExpression($record->sync_interval)) {
-                            return (new CronExpression($record->sync_interval))->getNextRunDate()->format('Y-m-d H:i:s');
+                            return (new CronExpression($record->sync_interval))->getNextRunDate()->format(app(DateFormatService::class)->getFormat());
                         }
 
                         return 'N/A';
@@ -347,11 +348,11 @@ class PlaylistResource extends Resource
                     })
                     ->toggleable(isToggledHiddenByDefault: true),
                 TextColumn::make('created_at')
-                    ->dateTime()
+                    ->formatStateUsing(fn ($state) => app(DateFormatService::class)->format($state))
                     ->sortable()
                     ->toggleable(isToggledHiddenByDefault: true),
                 TextColumn::make('updated_at')
-                    ->dateTime()
+                    ->formatStateUsing(fn ($state) => app(DateFormatService::class)->format($state))
                     ->sortable()
                     ->toggleable(isToggledHiddenByDefault: true),
             ])
@@ -1039,6 +1040,7 @@ class PlaylistResource extends Resource
                                     ->columns(1)
                                     ->schema([
                                         Livewire::make(XtreamApiInfo::class),
+                                        Livewire::make(XtreamDnsStatus::class),
                                     ]),
                             ]),
                     ])->contained(false),
@@ -1127,6 +1129,38 @@ class PlaylistResource extends Resource
                         ->columnSpan(2)
                         ->required()
                         ->hidden(fn (Get $get): bool => ! $get('xtream')),
+                    Section::make('DNS failover URLs')
+                        ->icon('heroicon-s-globe-alt')
+                        ->iconSize('md')
+                        ->compact()
+                        ->live()
+                        ->collapsed()
+                        ->schema([
+                            Repeater::make('xtream_fallback_urls')
+                                ->label('Alternative URLs')
+                                ->hiddenLabel()
+                                ->live()
+                                ->hintIcon(
+                                    'heroicon-s-information-circle',
+                                    tooltip: 'Alternative Xtream API URLs to try if the primary URL fails during a sync operation. Stream URLs will be automatically updated to the resolved URL.',
+                                )
+                                ->helperText('Alternative Xtream API URLs. If the primary URL fails during a sync, these will be tried in order (same credentials are used for all URLs).')
+                                ->simple(
+                                    TextInput::make('url')
+                                        ->label('URL')
+                                        ->prefixIcon('heroicon-m-globe-alt')
+                                        ->rules([new UrlIsAllowed])
+                                        ->maxLength(4000)
+                                        ->url()
+                                        ->required(),
+                                )
+                                ->defaultItems(0)
+                                ->maxItems(10)
+                                ->collapsible()
+                                ->collapsed()
+                                ->reorderable()
+                                ->columnSpan(2),
+                        ])->hidden(fn (Get $get): bool => ! $get('xtream')),
                     Grid::make()
                         ->columnSpanFull()
                         ->schema([
@@ -1219,30 +1253,69 @@ class PlaylistResource extends Resource
             Section::make('Provider Profiles')
                 ->description('Pool multiple Xtream accounts from this provider to increase concurrent stream capacity.')
                 ->icon('heroicon-o-user-group')
+                ->iconSize('md')
                 ->collapsible()
+                ->compact()
                 ->collapsed(fn (?Playlist $record): bool => ! ($record?->profiles_enabled ?? false))
                 ->hidden(fn (Get $get): bool => ! $get('xtream'))
                 ->schema([
-                    Toggle::make('profiles_enabled')
-                        ->label('Enable Provider Profiles')
-                        ->helperText('When enabled, proxy mode is required for accurate connection tracking.')
-                        ->live()
-                        ->afterStateUpdated(function (Set $set, $state) {
-                            if ($state) {
-                                $set('enable_proxy', true);
-                            }
-                        })
-                        ->rules([
-                            fn (): \Closure => function (string $attribute, $value, \Closure $fail) {
-                                if ($value && ! config('proxy.m3u_proxy_token')) {
-                                    $fail('Provider Profiles require the m3u-proxy to be configured. Please ensure M3U_PROXY_TOKEN is set.');
-                                }
-                            },
-                        ])
-                        ->inline(false)
-                        ->default(false),
-
                     Grid::make()
+                        ->columns(3)
+                        ->columnSpanFull()
+                        ->schema([
+                            Toggle::make('profiles_enabled')
+                                ->label('Enable Provider Profiles')
+                                ->helperText('NOTE: When enabled, proxy mode is required for accurate connection tracking.')
+                                ->live()
+                                ->afterStateUpdated(function (Set $set, $state) {
+                                    if ($state) {
+                                        $set('enable_proxy', true);
+                                    }
+                                })
+                                ->rules([
+                                    fn (): \Closure => function (string $attribute, $value, \Closure $fail) {
+                                        if ($value && ! config('proxy.m3u_proxy_token')) {
+                                            $fail('Provider Profiles require the m3u-proxy to be configured. Please ensure M3U_PROXY_TOKEN is set.');
+                                        }
+                                    },
+                                ])
+                                ->inline(false)
+                                ->default(false),
+
+                            Grid::make()
+                                ->columns(1)
+                                ->columnSpan(1)
+                                ->schema([
+                                    Toggle::make('bypass_provider_limits')
+                                        ->label('Bypass Provider Connection Limits')
+                                        ->hintIcon(
+                                            'heroicon-m-question-mark-circle',
+                                            tooltip: 'Only the "Available Streams" setting (Output tab) will determine when 503 errors are returned. Enable this if you use stream pooling or if your provider allows more connections than reported.'
+                                        )
+                                        ->helperText('When enabled, the proxy will attempt to start streams even if the provider\'s reported connection limit has been reached.')
+                                        ->visible(fn (Get $get): bool => (bool) $get('profiles_enabled'))
+                                        ->inline(false)
+                                        ->live()
+                                        ->default(false),
+                                    Placeholder::make('bypass_provider_limits_warning')
+                                        ->label('Provider Limits Warning')
+                                        ->content('⚠️ Provider connection limits will not be enforced. If the provider strictly enforces its limit, streams may fail at the provider level rather than being blocked by the proxy.')
+                                        ->visible(fn (Get $get): bool => (bool) $get('profiles_enabled') && (bool) $get('bypass_provider_limits')),
+                                ]),
+
+                            Toggle::make('enable_provider_affinity')
+                                ->label('Enable Provider Affinity')
+                                ->hintIcon(
+                                    'heroicon-m-question-mark-circle',
+                                    tooltip: 'When enabled, the proxy will remember which provider profile a client was assigned to and prefer it on subsequent requests. This prevents unnecessary profile switches during channel changes.'
+                                )
+                                ->helperText('Remember which provider profile a client was assigned to and prefer it on subsequent requests.')
+                                ->visible(fn (Get $get): bool => (bool) $get('profiles_enabled'))
+                                ->inline(false)
+                                ->default(false),
+                        ]),
+
+                    Fieldset::make('Primary Profile')
                         ->columns(2)
                         ->visible(fn (Get $get): bool => $get('profiles_enabled'))
                         ->schema([
@@ -1391,7 +1464,7 @@ class PlaylistResource extends Resource
                         ->collapsible()
                         ->itemLabel(fn (array $state): ?string => $state['name'] ?? $state['username'] ?? 'New Profile')
                         ->extraItemActions([
-                            \Filament\Actions\Action::make('test_profile')
+                            Action::make('test_profile')
                                 ->label('Test')
                                 ->icon('heroicon-o-signal')
                                 ->color('info')
@@ -1612,18 +1685,14 @@ class PlaylistResource extends Resource
                                 ->openUrlInNewTab(true)
                         )
                         ->helperText(fn ($get) => $get('sync_interval') && CronExpression::isValidExpression($get('sync_interval'))
-                            ? 'Next scheduled sync: '.(new CronExpression($get('sync_interval')))->getNextRunDate()->format('Y-m-d H:i:s')
+                            ? 'Next scheduled sync: '.(new CronExpression($get('sync_interval')))->getNextRunDate()->format(app(DateFormatService::class)->getFormat())
                             : 'Specify the CRON schedule for automatic sync, e.g. "0 3 * * *".')
                         ->hidden(fn (Get $get): bool => ! $get('auto_sync')),
 
-                    DateTimePicker::make('synced')
+                    Placeholder::make('synced')
                         ->columnSpan(2)
-                        ->suffix(config('app.timezone'))
-                        ->native(false)
                         ->label('Last Synced')
-                        ->disabled()
-                        ->helperText('The last time the playlist was successfully synced.')
-                        ->dehydrated(false),
+                        ->content(fn ($record) => app(DateFormatService::class)->format($record?->synced)),
                 ]),
         ];
 
@@ -1833,7 +1902,7 @@ class PlaylistResource extends Resource
                                     '\[.*\]',
                                 ])
                                 ->splitKeys(['Tab', 'Return']),
-                        ])->hidden(fn (Get $get): bool => ! $get('import_prefs.preprocess') || ! $get('status')),
+                        ])->hidden(fn (Get $get): bool => ! $get('import_prefs.preprocess') || ! $get('status') || ! $get('xtream')),
 
                     Fieldset::make('Series processing')
                         ->schema([
@@ -1918,7 +1987,7 @@ class PlaylistResource extends Resource
                                     '\[.*\]',
                                 ])
                                 ->splitKeys(['Tab', 'Return']),
-                        ])->hidden(fn (Get $get): bool => ! $get('import_prefs.preprocess') || ! $get('status')),
+                        ])->hidden(fn (Get $get): bool => ! $get('import_prefs.preprocess') || ! $get('status') || ! $get('xtream')),
 
                     TagsInput::make('import_prefs.ignored_file_types')
                         ->label('Ignored file types')
@@ -1939,14 +2008,14 @@ class PlaylistResource extends Resource
                 ->columns(2)
                 ->schema([
                     Toggle::make('enable_channels')
-                        ->label('Enable new channels')
+                        ->label('Enable new Live channels')
                         ->columnSpanFull()
                         ->live()
                         ->inline(true)
                         ->default(false)
-                        ->helperText('When enabled, newly added Live and VOD channels will be enabled by default.'),
+                        ->helperText('When enabled, newly added Live channels will be enabled by default.'),
 
-                    Fieldset::make('Default options for new channels')
+                    Fieldset::make('Default options for new Live channels')
                         ->columnSpanFull()
                         ->schema([
                             Toggle::make('import_prefs.channel_default_mapping_enabled')
@@ -1962,13 +2031,34 @@ class PlaylistResource extends Resource
                         ])
                         ->hidden(fn (Get $get): bool => ! $get('enable_channels')),
 
+                    Toggle::make('enable_vod_channels')
+                        ->label('Enable new VOD channels')
+                        ->columnSpanFull()
+                        ->live()
+                        ->inline(true)
+                        ->default(false)
+                        ->helperText('When enabled, newly added VOD channels will be enabled by default.')
+                        ->hidden(fn (Get $get): bool => ! $get('xtream')),
+
+                    Fieldset::make('Default options for new VOD channels')
+                        ->columnSpanFull()
+                        ->schema([
+                            Toggle::make('import_prefs.vod_channel_default_merge_enabled')
+                                ->label('Enable merging by default')
+                                ->inline(true)
+                                ->default(true)
+                                ->helperText('When enabled, newly added VOD channels will have merging enabled by default on sync.'),
+                        ])
+                        ->hidden(fn (Get $get): bool => ! $get('enable_vod_channels')),
+
                     Toggle::make('enable_series')
                         ->label('Enable new series')
                         ->columnSpanFull()
                         ->live()
                         ->inline(true)
                         ->default(false)
-                        ->helperText('When enabled, newly added series will be enabled by default on sync.'),
+                        ->helperText('When enabled, newly added series will be enabled by default on sync.')
+                        ->hidden(fn (Get $get): bool => ! $get('xtream')),
                 ]),
 
             Section::make('Series Processing')
@@ -2255,6 +2345,185 @@ class PlaylistResource extends Resource
                                 }),
                         ]),
                 ]),
+            Section::make('Find & Replace Rules')
+                ->description('Define find & replace rules that automatically run after each playlist sync. Rules execute in order.')
+                ->columnSpanFull()
+                ->collapsible()
+                ->collapsed($creating)
+                ->schema([
+                    Repeater::make('find_replace_rules')
+                        ->label('')
+                        ->schema([
+                            Toggle::make('enabled')
+                                ->label('Enabled')
+                                ->default(true)
+                                ->inline(false)
+                                ->columnSpan(1),
+                            TextInput::make('name')
+                                ->label('Rule Name')
+                                ->required()
+                                ->placeholder('e.g. Remove country prefix')
+                                ->columnSpan(2),
+                            Select::make('target')
+                                ->label('Target')
+                                ->options([
+                                    'channels' => 'Live Channels',
+                                    'vod_channels' => 'VOD Channels',
+                                    'groups' => 'Live Groups',
+                                    'vod_groups' => 'VOD Groups',
+                                    'series' => 'Series',
+                                    'categories' => 'Series Categories',
+                                ])
+                                ->default('channels')
+                                ->required()
+                                ->live()
+                                ->afterStateUpdated(fn (Set $set, ?string $state) => $set('column', match ($state) {
+                                    'groups', 'vod_groups', 'categories', 'series' => 'name',
+                                    default => 'title',
+                                }))
+                                ->columnSpan(2),
+                            Select::make('column')
+                                ->label('Column to modify')
+                                ->options(fn (Get $get): array => match ($get('target')) {
+                                    'series' => [
+                                        'name' => 'Series Name',
+                                        'genre' => 'Genre',
+                                        'plot' => 'Plot',
+                                    ],
+                                    'groups', 'vod_groups' => [
+                                        'name' => 'Group Name',
+                                    ],
+                                    'categories' => [
+                                        'name' => 'Category Name',
+                                    ],
+                                    'vod_channels' => [
+                                        'title' => 'Channel Title',
+                                        'name' => 'Channel Name (tvg-name)',
+                                        'info->description' => 'Description (metadata)',
+                                        'info->genre' => 'Genre (metadata)',
+                                    ],
+                                    default => [
+                                        'title' => 'Channel Title',
+                                        'name' => 'Channel Name (tvg-name)',
+                                    ],
+                                })
+                                ->default(fn (Get $get): string => match ($get('target')) {
+                                    'groups', 'vod_groups', 'categories', 'series' => 'name',
+                                    default => 'title',
+                                })
+                                ->required()
+                                ->columnSpan(2),
+
+                            Toggle::make('use_regex')
+                                ->label('Use Regex')
+                                ->default(true)
+                                ->inline(false)
+                                ->live()
+                                ->columnSpan(1),
+                            TextInput::make('find_replace')
+                                ->label(fn (Get $get): string => ($get('use_regex') ?? true) ? 'Pattern to find' : 'String to find')
+                                ->required()
+                                ->placeholder(fn (Get $get): string => ($get('use_regex') ?? true) ? '^(US- |UK- |CA- )' : 'US -')
+                                ->columnSpan(3),
+                            TextInput::make('replace_with')
+                                ->label('Replace with')
+                                ->placeholder('Leave empty to remove')
+                                ->columnSpan(3),
+                        ])
+                        ->columns(7)
+                        ->reorderable()
+                        ->reorderableWithButtons()
+                        ->collapsible()
+                        ->defaultItems(0)
+                        ->addActionLabel('Add find & replace rule')
+                        ->itemLabel(fn (array $state): ?string => ($state['name'] ?? null)
+                            ? ($state['name'].($state['enabled'] ?? true ? '' : ' (disabled)'))
+                            : null
+                        ),
+                ]),
+            Section::make('Sort Alpha Configs')
+                ->description('Define sort configurations that automatically run after each playlist sync. Configurations execute in order.')
+                ->columnSpanFull()
+                ->collapsible()
+                ->collapsed($creating)
+                ->schema([
+                    Repeater::make('sort_alpha_config')
+                        ->label('')
+                        ->schema([
+                            Toggle::make('enabled')
+                                ->label('Enabled')
+                                ->default(true)
+                                ->inline(false)
+                                ->columnSpan(1),
+                            Select::make('target')
+                                ->label('Target')
+                                ->options([
+                                    'live_groups' => 'Live Groups',
+                                    'vod_groups' => 'VOD Groups',
+                                ])
+                                ->live()
+                                ->default('live_groups')
+                                ->required()
+                                ->afterStateUpdated(fn (Set $set) => $set('group', ['all']))
+                                ->columnSpan(1),
+                            Select::make('group')
+                                ->label('Groups')
+                                ->options(fn (Get $get, ?Playlist $record): array => [
+                                    'all' => 'All groups',
+                                    ...($record
+                                        ? SourceGroup::where('playlist_id', $record->id)
+                                            ->where('type', match ($get('target')) {
+                                                'vod_groups' => 'vod',
+                                                default => 'live',
+                                            })
+                                            ->orderBy('name')
+                                            ->pluck('name', 'name')
+                                            ->toArray()
+                                        : []),
+                                ])
+                                ->default(['all'])
+                                ->multiple()
+                                ->searchable()
+                                ->columnSpan(3),
+                            Select::make('column')
+                                ->label('Sort By')
+                                ->options([
+                                    'title' => 'Title (or override if set)',
+                                    'name' => 'Name (or override if set)',
+                                    'stream_id' => 'ID (or override if set)',
+                                    'channel' => 'Channel No.',
+                                ])
+                                ->default('title')
+                                ->required()
+                                ->columnSpan(2),
+                            Select::make('sort')
+                                ->label('Sort Order')
+                                ->options([
+                                    'ASC' => 'A to Z or 0 to 9',
+                                    'DESC' => 'Z to A or 9 to 0',
+                                ])
+                                ->default('ASC')
+                                ->required()
+                                ->columnSpan(2),
+                        ])
+                        ->columns(9)
+                        ->reorderable()
+                        ->reorderableWithButtons()
+                        ->collapsible()
+                        ->defaultItems(0)
+                        ->addActionLabel('Add sort config')
+                        ->itemLabel(function (array $state): ?string {
+                            if (empty($state['target'])) {
+                                return null;
+                            }
+                            $targetLabel = $state['target'] === 'vod_groups' ? 'VOD Groups' : 'Live Groups';
+                            $groups = (array) ($state['group'] ?? ['all']);
+                            $groupLabel = \in_array('all', $groups) ? 'All' : implode(', ', $groups);
+                            $disabled = ($state['enabled'] ?? true) ? '' : ' (disabled)';
+
+                            return "{$targetLabel} — {$groupLabel}{$disabled}";
+                        }),
+                ]),
         ];
 
         $outputFields = [
@@ -2267,7 +2536,6 @@ class PlaylistResource extends Resource
                 ->schema([
                     Toggle::make('sync_logs_enabled')
                         ->label('Enable Sync Logs')
-                        ->columnSpan('full')
                         ->inline(false)
                         ->live()
                         ->default(true)
@@ -2281,6 +2549,16 @@ class PlaylistResource extends Resource
                         ->inline(false)
                         ->default(true)
                         ->helperText('NOTE: You will need to re-sync your playlist, or wait for the next scheduled sync, if changing this. This will overwrite any existing channel sort order customization for this playlist.'),
+                    Toggle::make('disable_catchup')
+                        ->label('Disable catch-up')
+                        ->columnSpan(1)
+                        ->inline(false)
+                        ->default(false)
+                        ->hintIcon(
+                            'heroicon-m-question-mark-circle',
+                            tooltip: 'When enabled, catch-up attributes will be stripped from M3U output and Xtream API responses (tv_archive, tv_archive_duration, has_archive).'
+                        )
+                        ->helperText('Strip all catch-up related attributes from the playlist output and Xtream API. Useful when your provider\'s catch-up doesn\'t work or is unreliable.'),
                     Toggle::make('auto_channel_increment')
                         ->label('Auto channel number increment')
                         ->columnSpan(1)
@@ -2336,24 +2614,46 @@ class PlaylistResource extends Resource
                         ->type('number')
                         ->default(0) // Default to 0 streams (unlimited)
                         ->required(),
-                    TextInput::make('available_streams')
-                        ->label('Available Streams')
-                        ->hint('Set to 0 for unlimited streams.')
-                        ->helperText('Number of streams available for this provider. If set to a value other than 0, will prevent any streams from starting if the number of active streams exceeds this value.')
-                        ->columnSpan(1)
-                        ->rules(['min:1'])
-                        ->type('number')
-                        ->default(0) // Default to 0 streams (for unlimted)
-                        ->required()
-                        ->hidden(fn (Get $get): bool => ! $get('enable_proxy')),
+                    TextInput::make('server_timezone')
+                        ->label('Provider Timezone')
+                        ->helperText('The portal/provider timezone (DST-aware). Needed to correctly use timeshift functionality.')
+                        ->placeholder('Etc/UTC')
+                        ->hintAction(
+                            Action::make('get_provider_value')
+                                ->label('Get from playlist status')
+                                ->icon('heroicon-o-clock')
+                                ->action(action: function ($record, Set $set) {
+                                    $value = $record->xtream_status['server_info']['timezone'] ?? null;
+                                    if ($value) {
+                                        $set('server_timezone', $value);
+                                        Notification::make()
+                                            ->title('Current Provider Timezone')
+                                            ->body("Provider timezone retrieved from playlist status: {$value}. Press save changes to apply this value, or you can manually enter a different timezone if needed.")
+                                            ->success()
+                                            ->send();
+
+                                        return;
+                                    }
+                                    Notification::make()
+                                        ->title('Provider Timezone Not Found')
+                                        ->body('Provider timezone not found in playlist status. Make sure the playlist is connected and has synced at least once to retrieve this information.')
+                                        ->danger()
+                                        ->send();
+                                })
+                        ),
 
                     Grid::make()
                         ->columns(3)
                         ->schema([
-                            TextInput::make('server_timezone')
-                                ->label('Provider Timezone')
-                                ->helperText('The portal/provider timezone (DST-aware). Needed to correctly use timeshift functionality when playlist proxy is enabled.')
-                                ->placeholder('Etc/UTC'),
+                            TextInput::make('available_streams')
+                                ->label('Available Streams')
+                                ->hint('Set to 0 for unlimited streams.')
+                                ->helperText('Maximum proxy streams allowed. Applies regardless of Provider Profiles — set to 0 for unlimited. When Provider Profiles are enabled, this is the authoritative proxy-level limit while provider limits control routing.')
+                                ->columnSpan(1)
+                                ->rules(['min:0'])
+                                ->type('number')
+                                ->default(0) // Default to 0 streams (for unlimited)
+                                ->required(),
                             Toggle::make('strict_live_ts')
                                 ->label('Enable Strict Live TS Handling')
                                 ->hintAction(

@@ -11,6 +11,7 @@ use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\BelongsToMany;
 use Illuminate\Database\Eloquent\Relations\HasManyThrough;
+use Illuminate\Database\Eloquent\Relations\MorphMany;
 use Illuminate\Database\Eloquent\Relations\MorphToMany;
 
 class MergedPlaylist extends Model
@@ -88,7 +89,7 @@ class MergedPlaylist extends Model
         return $this->channels()->where('enabled', true);
     }
 
-    public function series(): hasManyThrough
+    public function series(): HasManyThrough
     {
         return $this->hasManyThrough(
             Series::class,
@@ -100,12 +101,12 @@ class MergedPlaylist extends Model
         );
     }
 
-    public function enabled_series(): hasManyThrough
+    public function enabled_series(): HasManyThrough
     {
         return $this->series()->where('enabled', true);
     }
 
-    public function seasons(): hasManyThrough
+    public function seasons(): HasManyThrough
     {
         return $this->hasManyThrough(
             Season::class,
@@ -117,7 +118,7 @@ class MergedPlaylist extends Model
         );
     }
 
-    public function episodes(): hasManyThrough
+    public function episodes(): HasManyThrough
     {
         return $this->hasManyThrough(
             Episode::class,
@@ -129,25 +130,25 @@ class MergedPlaylist extends Model
         );
     }
 
-    public function live_channels(): hasManyThrough
+    public function live_channels(): HasManyThrough
     {
         return $this->channels()
             ->where('is_vod', false);
     }
 
-    public function enabled_live_channels(): hasManyThrough
+    public function enabled_live_channels(): HasManyThrough
     {
         return $this->live_channels()
             ->where('enabled', true);
     }
 
-    public function vod_channels(): hasManyThrough
+    public function vod_channels(): HasManyThrough
     {
         return $this->channels()
             ->where('is_vod', true);
     }
 
-    public function enabled_vod_channels(): hasManyThrough
+    public function enabled_vod_channels(): HasManyThrough
     {
         return $this->vod_channels()
             ->where('enabled', true);
@@ -161,6 +162,11 @@ class MergedPlaylist extends Model
     public function postProcesses(): MorphToMany
     {
         return $this->morphToMany(PostProcess::class, 'processable');
+    }
+
+    public function playlistViewers(): MorphMany
+    {
+        return $this->morphMany(PlaylistViewer::class, 'viewerable');
     }
 
     public function enableProxy(): Attribute

@@ -15,6 +15,7 @@ use App\Filament\Resources\CustomPlaylists\RelationManagers\VodRelationManager;
 use App\Models\CustomPlaylist;
 use App\Models\PlaylistAuth;
 use App\Models\StreamProfile;
+use App\Services\DateFormatService;
 use App\Services\EpgCacheService;
 use App\Services\M3uProxyService;
 use App\Traits\HasUserFiltering;
@@ -141,11 +142,11 @@ class CustomPlaylistResource extends Resource
                     ->hidden(fn () => ! auth()->user()->canUseProxy())
                     ->sortable(),
                 TextColumn::make('created_at')
-                    ->dateTime()
+                    ->formatStateUsing(fn ($state) => app(DateFormatService::class)->format($state))
                     ->sortable()
                     ->toggleable(isToggledHiddenByDefault: true),
                 TextColumn::make('updated_at')
-                    ->dateTime()
+                    ->formatStateUsing(fn ($state) => app(DateFormatService::class)->format($state))
                     ->sortable()
                     ->toggleable(isToggledHiddenByDefault: true),
             ])
@@ -372,24 +373,23 @@ class CustomPlaylistResource extends Resource
                         ->type('number')
                         ->default(1) // Default to 1 stream
                         ->required(),
-                    TextInput::make('available_streams')
-                        ->label('Available Streams')
-                        ->hint('Set to 0 for unlimited streams.')
-                        ->helperText('Number of streams available for this playlist (only applies to custom channels assigned to this Custom Playlist).')
-                        ->columnSpan(1)
-                        ->rules(['min:0'])
-                        ->type('number')
-                        ->default(0) // Default to 0 streams (for unlimted)
-                        ->required()
-                        ->hidden(fn (Get $get): bool => ! $get('enable_proxy')),
+                    TextInput::make('server_timezone')
+                        ->label('Provider Timezone')
+                        ->helperText('The portal/provider timezone (DST-aware). Needed to correctly use timeshift functionality.')
+                        ->placeholder('Etc/UTC'),
 
                     Grid::make()
                         ->columns(3)
                         ->schema([
-                            TextInput::make('server_timezone')
-                                ->label('Provider Timezone')
-                                ->helperText('The portal/provider timezone (DST-aware). Needed to correctly use timeshift functionality when playlist proxy is enabled.')
-                                ->placeholder('Etc/UTC'),
+                            TextInput::make('available_streams')
+                                ->label('Available Streams')
+                                ->hint('Set to 0 for unlimited streams.')
+                                ->helperText('Number of streams available for this playlist (only applies to custom channels assigned to this Custom Playlist).')
+                                ->columnSpan(1)
+                                ->rules(['min:0'])
+                                ->type('number')
+                                ->default(0) // Default to 0 streams (for unlimted)
+                                ->required(),
                             Toggle::make('strict_live_ts')
                                 ->label('Enable Strict Live TS Handling')
                                 ->hintAction(

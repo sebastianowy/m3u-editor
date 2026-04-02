@@ -23,6 +23,11 @@ class SyncVodStrmFiles implements ShouldQueue
     use Queueable;
 
     /**
+     * Do not retry on failure (e.g. upstream server unreachable).
+     */
+    public int $tries = 1;
+
+    /**
      * Track sync locations that were processed for deferred cleanup
      */
     protected array $processedSyncLocations = [];
@@ -428,10 +433,15 @@ class SyncVodStrmFiles implements ShouldQueue
             $filePath = $path.'/'.$fileName;
 
             // Generate the url
-            $playlist = $this->playlist ?? $channel->getEffectivePlaylist();
-            $extension = $channel->container_extension ?? 'mkv';
-            $url = rtrim("/movie/{$playlist->user->name}/{$playlist->uuid}/".$channel->id.'.'.$extension, '.');
-            $url = PlaylistService::getBaseUrl($url);
+            $useOriginalUrl = ($sync_settings['url_type'] ?? 'proxy') === 'original';
+            if ($useOriginalUrl) {
+                $url = $channel->url_custom ?? $channel->url;
+            } else {
+                $playlist = $this->playlist ?? $channel->getEffectivePlaylist();
+                $extension = $channel->container_extension ?? 'mkv';
+                $url = rtrim("/movie/{$playlist->user->name}/{$playlist->uuid}/".$channel->id.'.'.$extension, '.');
+                $url = PlaylistService::getBaseUrl($url);
+            }
 
             // Build path options for tracking changes
             $pathOptions = [
@@ -722,6 +732,7 @@ class SyncVodStrmFiles implements ShouldQueue
 
         $global_sync_settings = [
             'enabled' => $settings->vod_stream_file_sync_enabled ?? false,
+            'url_type' => 'proxy',
             'include_season' => $settings->vod_stream_file_sync_include_season ?? true,
             'sync_location' => $channel->sync_location ?? $settings->vod_stream_file_sync_location ?? null,
             'path_structure' => $settings->vod_stream_file_sync_path_structure ?? ['group'],
