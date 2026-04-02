@@ -101,6 +101,7 @@ class XtreamService
         if (! ($this->playlist || $this->xtream_config)) {
             throw new Exception('Config not initialized. Call init() first with Playlist or Xtream config array.');
         }
+
         $user_agent = $this->playlist?->user_agent ?? 'VLC/3.0.21 LibVLC/3.0.21';
         $verify = ! ($this->playlist?->disable_ssl_verification ?? false);
 
