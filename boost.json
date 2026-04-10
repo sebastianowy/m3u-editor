@@ -7,7 +7,6 @@
         "cursor"
     ],
     "guidelines": true,
-    "herd_mcp": false,
     "mcp": true,
     "nightwatch_mcp": false,
     "packages": [
@@ -15,8 +14,12 @@
     ],
     "sail": false,
     "skills": [
+        "ai-sdk-development",
+        "laravel-best-practices",
         "configuring-horizon",
+        "socialite-development",
         "pest-testing",
-        "tailwindcss-development"
+        "tailwindcss-development",
+        "php-best-practices"
     ]
 }

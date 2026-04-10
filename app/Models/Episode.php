@@ -76,6 +76,15 @@ class Episode extends Model
         return $this->morphMany(StrmFileMapping::class, 'syncable');
     }
 
+    /**
+     * The human-readable display title for the episode.
+     * For episodes the title is the canonical display title.
+     */
+    public function getDisplayTitleAttribute(): string
+    {
+        return $this->title ?? '';
+    }
+
     public function getFloatingPlayerAttributes(?string $username = null, ?string $password = null): array
     {
         $settings = app(GeneralSettings::class);
@@ -84,11 +93,21 @@ class Episode extends Model
         $profileId = $settings->default_vod_stream_profile_id ?? null;
         $profile = $profileId ? StreamProfile::find($profileId) : null;
 
-        // Always proxy the internal player so we can attempt to transcode the stream for better compatibility
-        // Use internal (relative) URLs to prevent CORS and mixed-content issues
+        // When no transcoding profile is set, the proxy delivers raw bytes (direct proxy),
+        // not an HLS manifest. Use the actual container extension for both the URL path
+        // and player format so the browser's <video> element can handle the content correctly.
+        // The Xtream route accepts any format via {format?}, so this is safe for routing.
+        $internalFormat = null;
+        if (! $profile) {
+            $internalFormat = $this->container_extension ?? 'mkv';
+        }
+
+        // Use the Xtream URL structure to preserve auth (username/password in URL).
+        // Append ?player=true so XtreamStreamController routes this to the player
+        // endpoint that applies the in-app transcoding profile.
         [$url, $episodeFormat] = $this->getProxyUrl(
             withFormat: true,
-            profileFormat: $profile->format ?? null,
+            profileFormat: $profile->format ?? $internalFormat,
             username: $username,
             password: $password,
             internal: true
@@ -102,6 +121,7 @@ class Episode extends Model
             'series_id' => $this->series_id,
             'season_number' => $this->season,
             'title' => $this->title,
+            'display_title' => $this->display_title,
             'url' => $url,
             'format' => $episodeFormat,
             'type' => 'episode',
@@ -161,9 +181,13 @@ class Episode extends Model
         }
 
         // Append query parameter so our Xtream Stream controller knows to proxy the stream regardless of playlist settings
-        $url .= '?'.http_build_query([
+        $queryArgs = [
             'proxy' => 'true',
-        ]);
+        ];
+        if ($internal) {
+            $queryArgs['player'] = 'true';
+        }
+        $url .= '?'.http_build_query($queryArgs);
 
         return $withFormat ? [$url, $episodeFormat] : $url;
     }

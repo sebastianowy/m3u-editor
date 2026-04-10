@@ -2,6 +2,7 @@
 
 namespace App\Providers;
 
+use App\AI\PatchedAiManager;
 use App\Console\Commands\NetworkBroadcastEnsure;
 use App\Console\Commands\NetworkBroadcastHeal;
 use App\Enums\Status;
@@ -11,10 +12,11 @@ use App\Events\EpgUpdated;
 use App\Events\PlaylistCreated;
 use App\Events\PlaylistDeleted;
 use App\Events\PlaylistUpdated;
+use App\Http\Middleware\EnsureUserCanUseCopilot;
 use App\Jobs\ProcessChannelScrubber;
 use App\Jobs\SyncMediaServer;
+use App\Listeners\PersistUserLocale;
 use App\Livewire\BackupDestinationListRecords;
-use App\Livewire\StreamPlayer;
 use App\Livewire\TmdbSearch;
 use App\Models\Channel;
 use App\Models\ChannelFailover;
@@ -40,6 +42,7 @@ use App\Services\PlaylistService;
 use App\Services\ProxyService;
 use App\Services\SortService;
 use App\Settings\GeneralSettings;
+use CraftForge\FilamentLanguageSwitcher\Events\LocaleChanged;
 use Dedoc\Scramble\Scramble;
 use Dedoc\Scramble\Support\Generator\OpenApi;
 use Dedoc\Scramble\Support\Generator\SecurityScheme;
@@ -52,6 +55,7 @@ use Filament\Schemas\Components\Grid;
 use Filament\Schemas\Components\Section;
 use Filament\Support\Facades\FilamentView;
 use Filament\Tables\Columns\ImageColumn;
+use Filament\Tables\Table;
 use Filament\View\PanelsRenderHook;
 use Illuminate\Cache\RateLimiting\Limit;
 use Illuminate\Database\Eloquent\Model;
@@ -69,6 +73,7 @@ use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Facades\URL;
 use Illuminate\Support\ServiceProvider;
 use Illuminate\Support\Str;
+use Laravel\Ai\AiManager;
 use Livewire\Livewire;
 use SocialiteProviders\Manager\SocialiteWasCalled;
 use SocialiteProviders\OIDC\OIDCExtendSocialite;
@@ -82,7 +87,22 @@ class AppServiceProvider extends ServiceProvider
      */
     public function register(): void
     {
+        // Override the Laravel AI manager to fix a strict-mode tool schema bug
+        // where tools with no parameters are missing the required `parameters`
+        // object, causing OpenAI to return a 400 invalid_function_parameters error.
+        $this->app->scoped(AiManager::class, fn ($app) => new PatchedAiManager($app));
+
         $this->app->singleton(GitInfoService::class);
+
+        // Detect HTTPS before any provider boot() runs, so package providers
+        // calling asset() during their boot() (e.g. filament-copilot) get the
+        // correct scheme. We can't rely on TrustProxies middleware here — it
+        // runs after all providers have booted.
+        $this->app->booting(function () {
+            if (! $this->app->runningInConsole()) {
+                $this->configureDynamicHttpsDetection();
+            }
+        });
 
         // Register Artisan commands for HLS maintenance
         if ($this->app->runningInConsole()) {
@@ -113,12 +133,9 @@ class AppServiceProvider extends ServiceProvider
             // no HTTP request context for URL generation. Force the root URL,
             // including the configured port, so route()/url() use the correct base.
             $this->configureConsoleBaseUrl();
-        } elseif (request()->hasHeader('X-Forwarded-Proto')) {
-            // Detect actual protocol from request headers
-            // This allows the app to work correctly with both HTTP and HTTPS access
-            // when behind a reverse proxy with SSL termination
-            $this->configureDynamicHttpsDetection();
         }
+        // Note: HTTP scheme detection is handled via booting() callback in register()
+        // so that package providers calling asset() during boot() get the correct scheme.
 
         // Setup the middleware
         $this->setupMiddleware();
@@ -138,6 +155,9 @@ class AppServiceProvider extends ServiceProvider
         // Configure Filament v4 to preserve v3 behavior
         $this->configureFilamentV3Compatibility();
 
+        // Configure global Filament defaults (reorderable columns, etc.)
+        $this->configureFilamentGlobalDefaults();
+
         // Setup the API
         $this->setupApi();
 
@@ -147,8 +167,14 @@ class AppServiceProvider extends ServiceProvider
         // Apply user-defined timezone (when TZ env var is not set)
         $this->applyTimezoneFromSettings();
 
+        // Inject Copilot API key from settings into the Laravel AI config
+        $this->applyCopilotApiKeyFromSettings();
+
         // Register the OIDC Socialite driver (when enabled)
         $this->registerOidcProvider();
+
+        // Persist user locale preference when changed via the language switcher
+        $this->registerLocaleListener();
 
         // Livewire components
         $this->registerLivewireComponents();
@@ -293,6 +319,13 @@ class AppServiceProvider extends ServiceProvider
         });
 
         // Note: Proxy rate limiting is handled by ProxyRateLimitMiddleware for better performance
+
+        // Gate the copilot stream endpoint behind the use_ai_copilot permission.
+        // Runs after all routes are registered so the vendor route exists.
+        $this->app->booted(function () {
+            $route = app('router')->getRoutes()->getByName('filament-copilot.stream');
+            $route?->middleware(EnsureUserCanUseCopilot::class);
+        });
     }
 
     /**
@@ -424,7 +457,9 @@ class AppServiceProvider extends ServiceProvider
                         'url' => rtrim($playlist->xtream_config['url'], '/'),
                     ];
                 }
-                $playlist->uuid = Str::orderedUuid()->toString();
+                if (! $playlist->uuid) {
+                    $playlist->uuid = Str::orderedUuid()->toString();
+                }
 
                 return $playlist;
             });
@@ -600,6 +635,13 @@ class AppServiceProvider extends ServiceProvider
                     // Update the name of the group in the channels
                     $group->channels()
                         ->update(['group' => $group->name]);
+                }
+            });
+
+            // Auto-generate UUID for channels
+            Channel::creating(function (Channel $channel) {
+                if (empty($channel->uuid)) {
+                    $channel->uuid = Str::orderedUuid()->toString();
                 }
             });
 
@@ -809,6 +851,29 @@ class AppServiceProvider extends ServiceProvider
     }
 
     /**
+     * Inject the Copilot API key stored in GeneralSettings into the Laravel AI
+     * provider config so it takes effect at request time without requiring an
+     * env var to be set. This runs after settings are available and before any
+     * AI requests are made.
+     */
+    private function applyCopilotApiKeyFromSettings(): void
+    {
+        try {
+            $settings = app(GeneralSettings::class);
+
+            if (! empty($settings->copilot_api_key) && ! empty($settings->copilot_provider)) {
+                config(["ai.providers.{$settings->copilot_provider}.key" => $settings->copilot_api_key]);
+            }
+
+            if (! empty($settings->copilot_url) && in_array($settings->copilot_provider, ['openai', 'ollama'], true)) {
+                config(["ai.providers.{$settings->copilot_provider}.url" => $settings->copilot_url]);
+            }
+        } catch (Throwable) {
+            // Settings may not be available during fresh installs / migrations
+        }
+    }
+
+    /**
      * Apply the user-defined application timezone from settings when the
      * TZ environment variable is not explicitly set.
      *
@@ -822,8 +887,7 @@ class AppServiceProvider extends ServiceProvider
         // TZ environment variable always takes priority
         $envTimezone = config('dev.timezone');
         if (! empty($envTimezone)) {
-            config(['app.timezone' => $envTimezone]);
-            date_default_timezone_set($envTimezone);
+            $this->setApplicationTimezone($envTimezone);
 
             return;
         }
@@ -833,11 +897,26 @@ class AppServiceProvider extends ServiceProvider
             $timezone = $settings->app_timezone;
 
             if (! empty($timezone) && in_array($timezone, \DateTimeZone::listIdentifiers(), true)) {
-                config(['app.timezone' => $timezone]);
-                date_default_timezone_set($timezone);
+                $this->setApplicationTimezone($timezone);
             }
         } catch (Throwable) {
             // Settings may not be available during fresh installs / migrations
+        }
+    }
+
+    /**
+     * Apply a timezone consistently across the application and database.
+     */
+    private function setApplicationTimezone(string $timezone): void
+    {
+        config(['app.timezone' => $timezone]);
+        date_default_timezone_set($timezone);
+
+        // Sync the database session timezone so that timestamps stored via
+        // PostgreSQL's timestamptz columns use the correct offset.
+        $connection = config('database.default');
+        if (config("database.connections.{$connection}.driver") === 'pgsql') {
+            config(["database.connections.{$connection}.timezone" => $timezone]);
         }
     }
 
@@ -873,9 +952,6 @@ class AppServiceProvider extends ServiceProvider
         // Register the backup destination list records component
         Livewire::component('backup-destination-list-records', BackupDestinationListRecords::class);
 
-        // Register the stream player component
-        Livewire::component('stream-player', StreamPlayer::class);
-
         // Register the TMDB search component
         Livewire::component('tmdb-search', TmdbSearch::class);
     }
@@ -892,6 +968,14 @@ class AppServiceProvider extends ServiceProvider
         Event::listen(
             SocialiteWasCalled::class,
             [OIDCExtendSocialite::class, 'handle'],
+        );
+    }
+
+    private function registerLocaleListener(): void
+    {
+        Event::listen(
+            LocaleChanged::class,
+            PersistUserLocale::class,
         );
     }
 
@@ -928,5 +1012,17 @@ class AppServiceProvider extends ServiceProvider
         // Preserve v3 unique validation behavior (not ignoring record by default)
         Field::configureUsing(fn (Field $field) => $field
             ->uniqueValidationIgnoresRecordByDefault(false));
+    }
+
+    /**
+     * Configure global Filament resource defaults.
+     */
+    private function configureFilamentGlobalDefaults(): void
+    {
+        // Enable reorderable columns on all tables by default
+        Table::configureUsing(fn (Table $table) => $table
+            ->reorderableColumns()
+            ->deferColumnManager(false)
+        );
     }
 }

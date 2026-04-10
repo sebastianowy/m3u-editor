@@ -96,6 +96,8 @@ class ProcessM3uImport implements ShouldQueue
     // Merging enabled by default
     public bool $canMergeEnabled = true;
 
+    public bool $probeEnabled = true;
+
     // VOD merging enabled by default
     public bool $canMergeVodEnabled = true;
 
@@ -140,6 +142,9 @@ class ProcessM3uImport implements ShouldQueue
             $canMergeEnabled = $playlist->import_prefs['channel_default_merge_enabled'] ?? null;
             $this->epgMapEnabled = $epgMapEnabled !== null ? $epgMapEnabled : true;
             $this->canMergeEnabled = $canMergeEnabled !== null ? $canMergeEnabled : true;
+
+            $probeEnabled = $playlist->import_prefs['channel_default_probe_enabled'] ?? null;
+            $this->probeEnabled = $probeEnabled !== null ? $probeEnabled : true;
         }
 
         // See if VOD channel options set
@@ -578,6 +583,7 @@ class ProcessM3uImport implements ShouldQueue
                 'source_id' => null, // source ID for the channel
                 'can_merge' => $this->canMergeEnabled,
                 'epg_map_enabled' => $this->epgMapEnabled,
+                'probe_enabled' => $this->probeEnabled,
             ];
 
             // Keep track of channel number
@@ -848,9 +854,11 @@ class ProcessM3uImport implements ShouldQueue
                     'tvg_shift' => null,
                     'is_vod' => false, // default false, matches Xtream API path
                     'container_extension' => null,
-                    'source_id' => null, // source ID for the channel
+                    'source_id' => null, // filled by ProcessM3uImportChunk after collision detection
+                    'source_key' => null, // pre-hash composite key; set per-channel below
                     'can_merge' => $this->canMergeEnabled,
                     'epg_map_enabled' => $this->epgMapEnabled,
+                    'probe_enabled' => $this->probeEnabled,
                 ];
                 if ($autoSort) {
                     $channelFields['sort'] = 0;
@@ -982,8 +990,8 @@ class ProcessM3uImport implements ShouldQueue
                                     continue;
                                 }
 
-                                // Set the source ID based on our composite index
-                                $channel['source_id'] = md5($channel['title'].$channel['name'].$chGroup);
+                                // Set the source key — hashing and collision detection happen in ProcessM3uImportChunk
+                                $channel['source_key'] = $channel['title'].$channel['name'].$chGroup;
 
                                 // Update group name to the singular name and return the channel
                                 $channel['group'] = $chGroup;
@@ -1021,8 +1029,8 @@ class ProcessM3uImport implements ShouldQueue
                                 continue;
                             }
 
-                            // Set the source ID based on our composite index
-                            $channel['source_id'] = md5($channel['title'].$channel['name'].$channel['group']);
+                            // Set the source key — hashing and collision detection happen in ProcessM3uImportChunk
+                            $channel['source_key'] = $channel['title'].$channel['name'].$channel['group'];
 
                             // Set channel number, if auto sort is enabled
                             if ($autoSort) {

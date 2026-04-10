@@ -18,7 +18,6 @@ use Filament\Forms\Concerns\InteractsWithForms;
 use Filament\Forms\Contracts\HasForms;
 use Filament\Notifications\Notification;
 use Illuminate\Support\Facades\Log;
-use Illuminate\Support\Str;
 use Livewire\Component;
 
 class EpgViewer extends Component implements HasActions, HasForms
@@ -110,29 +109,9 @@ class EpgViewer extends Component implements HasActions, HasForms
                     // Add URL for Playlist channels
                     if ($this->type !== 'Epg') {
                         $playlist = $updated->playlist;
-                        $proxyEnabled = $playlist?->enable_proxy ?? false;
-                        $url = $updated->url_custom ?? $updated->url;
-
-                        // Get the URL based on proxy settings
-                        // Use internal (relative) URL for the in-app player to prevent CORS issues
-                        if ($proxyEnabled) {
-                            $url = $record->getProxyUrl(internal: true);
-                        }
-
-                        if (Str::endsWith($url, '.m3u8')) {
-                            $channelFormat = 'hls';
-                        } elseif (Str::endsWith($url, '.ts')) {
-                            $channelFormat = 'ts';
-                        } else {
-                            $channelFormat = $updated->container_extension ?? 'ts';
-                        }
-
-                        // MKV compatibility hack
-                        if (Str::endsWith($url, '.mkv')) {
-                            // Use a little "hack" to allow playback of MKV streams
-                            // We'll change the format so that the mpegts.js player is used
-                            $channelFormat = 'ts';
-                        }
+                        $channelResults = $updated->getFloatingPlayerAttributes();
+                        $url = $channelResults['url'] ?? '';
+                        $channelFormat = $channelResults['format'] ?? '';
 
                         // Get the icon
                         $icon = '';
@@ -148,10 +127,12 @@ class EpgViewer extends Component implements HasActions, HasForms
                             $icon = url('/placeholder.png');
                         }
 
-                        // Add URL, format, and icon to channel data
+                        // Add URL, format, icon, and display title to channel data
                         $channelData['url'] = $url;
                         $channelData['format'] = $channelFormat;
                         $channelData['icon'] = $icon;
+                        $channelData['title'] = $channelResults['title'] ?? $updated->name_custom ?? $updated->name;
+                        $channelData['display_title'] = $channelResults['display_title'] ?? $updated->display_title;
 
                         // Fetch programme data for Playlist channels if they have an EPG channel
                         if ($updated->epgChannel) {
@@ -256,8 +237,13 @@ class EpgViewer extends Component implements HasActions, HasForms
             ? route('api.epg.data', ['uuid' => $this->record?->uuid])
             : route('api.epg.playlist.data', ['uuid' => $this->record?->uuid]);
 
+        $groupsApiUrl = $this->type !== 'Epg'
+            ? route('api.epg.playlist.groups', ['uuid' => $this->record?->uuid])
+            : null;
+
         return view('livewire.epg-viewer', [
             'route' => $route,
+            'groupsApiUrl' => $groupsApiUrl,
             'vod' => $this->vod,
             'username' => $this->username,
             'password' => $this->password,

@@ -25,7 +25,7 @@ class PlayerController extends Controller
         }
 
         $streamFormat = (string) $request->query('format', 'ts');
-        if (! in_array($streamFormat, ['ts', 'mpegts', 'hls', 'm3u8'], true)) {
+        if (! in_array($streamFormat, ['ts', 'mpegts', 'hls', 'm3u8', 'mp4', 'm4v', 'mkv', 'webm', 'mov'], true)) {
             $streamFormat = 'ts';
         }
 
@@ -48,10 +48,12 @@ class PlayerController extends Controller
         $seriesId = (int) $request->query('series_id', 0);
         $seasonNumber = (int) $request->query('season_number', 0);
 
+        $channelTitle = (string) $request->query('display_title', $request->query('title', 'Channel Player'));
+
         return view('player.popout', [
             'streamUrl' => $streamUrl,
             'streamFormat' => $streamFormat,
-            'channelTitle' => (string) $request->query('title', 'Channel Player'),
+            'channelTitle' => $channelTitle,
             'channelLogo' => $channelLogo,
             'contentType' => $contentType,
             'streamId' => $streamId ?: null,

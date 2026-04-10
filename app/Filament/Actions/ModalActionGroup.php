@@ -27,14 +27,14 @@ class ModalActionGroup extends Action
         $static = parent::make($name);
 
         // Set defaults
-        $static->label('Actions');
-        $static->tooltip('Open action menu');
+        $static->label(__('Actions'));
+        $static->tooltip(__('Open action menu'));
         $static->icon('heroicon-s-wrench-screwdriver');
         $static->modalIcon('heroicon-o-wrench-screwdriver');
-        $static->modalHeading('Actions');
+        $static->modalHeading(__('Actions'));
         $static->modalWidth('2xl');
         $static->modalSubmitAction(false);
-        $static->modalCancelActionLabel('Cancel');
+        $static->modalCancelActionLabel(__('Cancel'));
         $static->slideOver(condition: true); // Default to slide-over for better UX with many actions
 
         // Add custom class to the modal for targeting
@@ -50,6 +50,15 @@ class ModalActionGroup extends Action
 
     public function schema(array|Closure|null $schema): static
     {
+        // Ensure child actions close the parent modal when they complete
+        if (is_array($schema)) {
+            foreach ($schema as $component) {
+                if ($component instanceof Action) {
+                    $component->cancelParentActions();
+                }
+            }
+        }
+
         // Wrap the schema in our grid layout
         $schema = [
             Grid::make(columns: $this->gridColumns)
@@ -61,6 +70,13 @@ class ModalActionGroup extends Action
 
     public function actions(array $actions): static
     {
+        // Ensure child actions close the parent modal when they complete
+        foreach ($actions as $action) {
+            if ($action instanceof Action) {
+                $action->cancelParentActions();
+            }
+        }
+
         $this->childActions = $actions;
 
         // Register these as modal footer actions with a closure

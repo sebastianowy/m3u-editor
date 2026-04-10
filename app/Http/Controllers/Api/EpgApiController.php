@@ -10,9 +10,7 @@ use App\Http\Controllers\LogoProxyController;
 use App\Http\Controllers\PlaylistGenerateController;
 use App\Models\Epg;
 use App\Models\Playlist;
-use App\Models\StreamProfile;
 use App\Services\EpgCacheService;
-use App\Settings\GeneralSettings;
 use Carbon\Carbon;
 use Exception;
 use Illuminate\Http\JsonResponse;
@@ -181,7 +179,7 @@ class EpgApiController extends Controller
         $perPage = (int) $request->get('per_page', 50);
         $skip = max(0, ($page - 1) * $perPage);
         $search = $request->get('search', null);
-        $vod = (bool) $request->get('vod', false);
+        $group = $request->get('group', null) ?: null;
         $username = $request->get('username', null);
         $password = $request->get('password', null);
 
@@ -204,6 +202,7 @@ class EpgApiController extends Controller
             'per_page' => $perPage,
             'start_date' => $startDate,
             'end_date' => $endDate,
+            'group' => $group,
         ]);
         try {
             // Get enabled channels from the playlist
@@ -218,27 +217,17 @@ class EpgApiController extends Controller
                             ->orWhereRaw('LOWER(channels.title_custom) LIKE ?', ['%'.$search.'%']);
                     });
                 })
+                ->when($group, function ($queryBuilder) use ($group) {
+                    $g = $queryBuilder->getQuery()->getGrammar();
+                    $coalesce = 'COALESCE('.$g->wrap('channels.group').', '.$g->wrap('channels.group_internal').')';
+
+                    return $queryBuilder->whereRaw("LOWER({$coalesce}) = ?", [Str::lower($group)]);
+                })
                 ->limit($perPage)
                 ->offset($skip)
                 ->cursor();
 
-            // Get the stream profile to use for the floating player
-            // Prefer playlist profiles over globals
-            $settings = app(GeneralSettings::class);
-            $vodProfile = $playlist->vodStreamProfile;
-            $liveProfile = $playlist->streamProfile;
-
-            if (! $vodProfile) {
-                $vodProfileId = $settings->default_vod_stream_profile_id ?? null;
-                $vodProfile = $vodProfileId ? StreamProfile::find($vodProfileId) : null;
-            }
-            if (! $liveProfile) {
-                $liveProfileId = $settings->default_stream_profile_id ?? null;
-                $liveProfile = $liveProfileId ? StreamProfile::find($liveProfileId) : null;
-            }
-
             // Check the proxy format
-            $proxyEnabled = $playlist->enable_proxy;
             $logoProxyEnabled = $playlist->enable_logo_proxy;
 
             // If auto channel increment is enabled, set the starting channel number
@@ -260,9 +249,9 @@ class EpgApiController extends Controller
                     $channelNo = ++$channelNumber;
                 }
 
-                // Ensure we always have a unique identifier for the channel
-                // Use database ID as fallback if channel number is not set
-                $channelKey = $channelNo ?: $channel->id;
+                // Always use the database primary key as the array key to guarantee uniqueness.
+                // Duplicate channel numbers would otherwise overwrite earlier entries.
+                $channelKey = $channel->id;
                 if ($epgId) {
                     $epgIds[] = $epgId;
                     if (! isset($epgChannelMap[$epgId])) {
@@ -313,6 +302,7 @@ class EpgApiController extends Controller
                     $dummyEpgChannels[] = [
                         'playlist_channel_id' => $channelKey,
                         'display_name' => $channel->title_custom ?? $channel->title,
+                        'display_title' => $channel->display_title,
                         'title' => $channel->name_custom ?? $channel->name,
                         'icon' => $icon,
                         'channel_number' => $channelNo,
@@ -340,9 +330,12 @@ class EpgApiController extends Controller
                         break;
                 }
 
-                // Get the channel URL and format from the computed attribute, which handles proxy logic
-                // Use internal (relative) URLs for the in-app player to prevent CORS issues
-                [$url, $channelFormat] = $channel->getProxyUrl(withFormat: true, username: $username, password: $password, internal: true);
+                // Get the channel URL with embedded auth.
+                // XtreamStreamController routes to the channelPlayer method, which
+                // applies the in-app transcoding profile.
+                $channelResults = $channel->getFloatingPlayerAttributes(username: $username, password: $password);
+                $url = $channelResults['url'] ?? '';
+                $channelFormat = $channelResults['format'] ?? '';
 
                 // Get the icon
                 $icon = '';
@@ -368,12 +361,11 @@ class EpgApiController extends Controller
                     'content_type' => $channel->is_vod ? 'vod' : 'live',
                     'playlist_id' => $playlist->id,
                     'url' => $url,
-                    'format' => $channel->is_vod
-                        ? ($vodProfile->format ?? $channelFormat)
-                        : ($liveProfile->format ?? $channelFormat),
+                    'format' => $channelFormat,
                     'tvg_id' => $tvgId,
                     'display_name' => $channel->title_custom ?? $channel->title,
-                    'title' => $channel->name_custom ?? $channel->name,
+                    'display_title' => $channelResults['display_title'] ?? $channel->display_title,
+                    'title' => $channelResults['title'] ?? $channel->name_custom ?? $channel->name,
                     'channel_number' => $channelNo,
                     'group' => $channel->group ?? $channel->group_internal,
                     'icon' => $icon,
@@ -384,19 +376,27 @@ class EpgApiController extends Controller
                 ];
             }
 
-            // Apply pagination to playlist channels
-            $totalChannels = $playlist->channels()->when($search, function ($queryBuilder) use ($search) {
-                $search = Str::lower($search);
+            // Apply pagination to playlist channels — use the same base query as the data
+            // fetch so the count reflects identical filters (VOD setting, enabled, custom
+            // tag deduplication) and stays consistent with the paginated results.
+            $totalChannels = PlaylistGenerateController::getChannelQuery($playlist)
+                ->when($search, function ($queryBuilder) use ($search) {
+                    $search = Str::lower($search);
 
-                return $queryBuilder->where(function ($query) use ($search) {
-                    $query->whereRaw('LOWER(channels.name) LIKE ?', ['%'.$search.'%'])
-                        ->orWhereRaw('LOWER(channels.name_custom) LIKE ?', ['%'.$search.'%'])
-                        ->orWhereRaw('LOWER(channels.title) LIKE ?', ['%'.$search.'%'])
-                        ->orWhereRaw('LOWER(channels.title_custom) LIKE ?', ['%'.$search.'%']);
-                });
-            })->when(! $vod, function ($query) {
-                return $query->where('channels.is_vod', false);
-            })->where('enabled', true)->count();
+                    return $queryBuilder->where(function ($query) use ($search) {
+                        $query->whereRaw('LOWER(channels.name) LIKE ?', ['%'.$search.'%'])
+                            ->orWhereRaw('LOWER(channels.name_custom) LIKE ?', ['%'.$search.'%'])
+                            ->orWhereRaw('LOWER(channels.title) LIKE ?', ['%'.$search.'%'])
+                            ->orWhereRaw('LOWER(channels.title_custom) LIKE ?', ['%'.$search.'%']);
+                    });
+                })
+                ->when($group, function ($queryBuilder) use ($group) {
+                    $g = $queryBuilder->getQuery()->getGrammar();
+                    $coalesce = 'COALESCE('.$g->wrap('channels.group').', '.$g->wrap('channels.group_internal').')';
+
+                    return $queryBuilder->whereRaw("LOWER({$coalesce}) = ?", [Str::lower($group)]);
+                })
+                ->count();
 
             $channels = $playlistChannelData;
 
@@ -757,6 +757,40 @@ class EpgApiController extends Controller
                 'error' => 'Failed to retrieve EPG data: '.$e->getMessage(),
             ], 500);
         }
+    }
+
+    /**
+     * Get distinct group names for a playlist's enabled channels.
+     * Used to populate the category tabs on the EPG guide page.
+     */
+    public function getGroupsForPlaylist(string $uuid, Request $request): JsonResponse
+    {
+        $playlist = PlaylistFacade::resolvePlaylistByUuid($uuid);
+        if (! $playlist) {
+            return response()->json(['error' => 'Playlist Not Found'], 404);
+        }
+
+        $vod = (bool) $request->get('vod', false);
+
+        $channelQuery = $playlist->channels();
+        $g = $channelQuery->getQuery()->getGrammar();
+        $coalesce = 'COALESCE('.$g->wrap('channels.group').', '.$g->wrap('channels.group_internal').')';
+
+        $groups = $channelQuery
+            ->selectRaw("{$coalesce} as effective_group")
+            ->when(! $vod, function ($q) {
+                $q->where('channels.is_vod', false);
+            })
+            ->where('channels.enabled', true)
+            ->whereRaw("{$coalesce} IS NOT NULL")
+            ->whereRaw("{$coalesce} != ''")
+            ->groupByRaw($coalesce)
+            ->orderByRaw("LOWER({$coalesce})")
+            ->pluck('effective_group')
+            ->values()
+            ->toArray();
+
+        return response()->json(['groups' => $groups]);
     }
 
     /**

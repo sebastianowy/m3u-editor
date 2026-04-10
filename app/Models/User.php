@@ -238,6 +238,14 @@ class User extends Authenticatable implements FilamentUser, HasAppAuthentication
     }
 
     /**
+     * Plugin management is intentionally admin-only in the trusted-local model.
+     */
+    public function canManagePlugins(): bool
+    {
+        return $this->isAdmin();
+    }
+
+    /**
      * Check if user can use stream file sync.
      */
     public function canUseStreamFileSync(): bool
@@ -262,6 +270,14 @@ class User extends Authenticatable implements FilamentUser, HasAppAuthentication
     }
 
     /**
+     * Check if user can use the AI Copilot.
+     */
+    public function canUseAiCopilot(): bool
+    {
+        return $this->hasPermission('use_ai_copilot');
+    }
+
+    /**
      * Get all available permissions.
      */
     public static function getAvailablePermissions(): array
@@ -273,6 +289,7 @@ class User extends Authenticatable implements FilamentUser, HasAppAuthentication
             'use_stream_file_sync' => 'Use Stream File Sync',
             'use_scrubber' => 'Use Scrubber',
             'view_release_logs' => 'View Release Logs',
+            'use_ai_copilot' => 'Use AI Copilot',
         ];
     }
 }

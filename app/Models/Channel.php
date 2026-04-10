@@ -18,7 +18,6 @@ use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\BelongsToMany;
 use Illuminate\Database\Eloquent\Relations\HasManyThrough;
 use Illuminate\Database\Eloquent\Relations\MorphMany;
-use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\URL;
 use Illuminate\Support\Str;
@@ -58,6 +57,9 @@ class Channel extends Model
         'epg_map_enabled' => 'boolean',
         'logo_type' => ChannelLogoType::class,
         'sort' => 'decimal:4',
+        'stream_stats' => 'array',
+        'stream_stats_probed_at' => 'datetime',
+        'probe_enabled' => 'boolean',
     ];
 
     public function user(): BelongsTo
@@ -146,6 +148,16 @@ class Channel extends Model
         )->orderBy('channel_failovers.sort');
     }
 
+    /**
+     * The human-readable display title for the channel.
+     * Prefers the custom EPG title, falls back to the raw EPG title,
+     * then the custom stream name, then the raw stream name.
+     */
+    public function getDisplayTitleAttribute(): string
+    {
+        return $this->title_custom ?? $this->title ?? $this->name_custom ?? $this->name ?? '';
+    }
+
     public function getFloatingPlayerAttributes(?string $username = null, ?string $password = null): array
     {
         $settings = app(GeneralSettings::class);
@@ -157,11 +169,21 @@ class Channel extends Model
         }
         $profile = $profileId ? StreamProfile::find($profileId) : null;
 
-        // Always proxy the internal player so we can attempt to transcode the stream for better compatibility
-        // Use internal (relative) URLs to prevent CORS and mixed-content issues
+        // When no transcoding profile is set, the proxy delivers raw bytes (direct proxy),
+        // not an HLS manifest. For VOD channels, use the actual container extension for both
+        // the URL path and player format so the browser's <video> element handles the content.
+        // Live channels are unaffected as m3u8/ts are valid direct-proxy formats.
+        $internalFormat = null;
+        if (! $profile && $this->is_vod) {
+            $internalFormat = $this->container_extension ?? 'mkv';
+        }
+
+        // Use the Xtream URL structure to preserve auth (username/password in URL).
+        // Append ?player=true so XtreamStreamController routes this to the player
+        // endpoint that applies the in-app transcoding profile.
         [$url, $format] = $this->getProxyUrl(
             withFormat: true,
-            profileFormat: $profile->format ?? null,
+            profileFormat: $profile->format ?? $internalFormat,
             username: $username,
             password: $password,
             internal: true
@@ -173,8 +195,9 @@ class Channel extends Model
             'content_type' => $this->is_vod ? 'vod' : 'live',
             'playlist_id' => $this->playlist_id,
             'title' => $this->name_custom ?? $this->name,
+            'display_title' => $this->display_title,
             'url' => $url,
-            'format' => $profile->format ?? $format,
+            'format' => $format,
             'type' => 'channel',
         ];
     }
@@ -196,7 +219,7 @@ class Channel extends Model
     public function getProxyUrl(?bool $withFormat = false, ?string $profileFormat = null, ?string $username = null, ?string $password = null, bool $internal = false)
     {
         // Load the effective playlist to determine proxy settings and get UUID for authentication
-        $playlist = Playlist::find($this->playlist_id ?: $this->custom_playlist_id);
+        $playlist = $this->playlist ?? $this->customPlaylist;
         $user = $this->user;
         $originalUrl = $this->url_custom ?? $this->url;
 
@@ -246,9 +269,13 @@ class Channel extends Model
         }
 
         // Append query parameter so our Xtream Stream controller knows to proxy the stream regardless of playlist settings
-        $url .= '?'.http_build_query([
+        $queryArgs = [
             'proxy' => 'true',
-        ]);
+        ];
+        if ($internal) {
+            $queryArgs['player'] = 'true';
+        }
+        $url .= '?'.http_build_query($queryArgs);
 
         return $withFormat ? [$url, $channelFormat] : $url;
     }
@@ -260,33 +287,64 @@ class Channel extends Model
      */
     public function getStreamStatsAttribute(): array
     {
-        $stats = Cache::get("channel_stream_stats_{$this->id}");
-        if ($stats !== null) {
+        $raw = $this->attributes['stream_stats'] ?? null;
+        if ($raw) {
+            $decoded = is_string($raw) ? json_decode($raw, true) : $raw;
+            if (! empty($decoded)) {
+                return $decoded;
+            }
+        }
+
+        return [];
+    }
+
+    /**
+     * Return stream_stats, probing via ffprobe and persisting to the database if not yet populated.
+     */
+    public function ensureStreamStats(): array
+    {
+        $stats = $this->stream_stats;
+
+        if (! empty($stats)) {
             return $stats;
         }
+
+        $stats = $this->probeStreamStats();
+
+        if (! empty($stats)) {
+            $this->updateQuietly([
+                'stream_stats' => $stats,
+                'stream_stats_probed_at' => now(),
+            ]);
+        }
+
+        return $stats;
+    }
+
+    /**
+     * Run ffprobe against this channel's stream URL and return parsed stats.
+     *
+     * @return array{streams: array<int, array{codec_type: string, codec_name: string, codec_long_name: ?string, profile: ?string, width: ?int, height: ?int, bit_rate: ?string, avg_frame_rate: ?string, display_aspect_ratio: ?string, sample_rate: ?string, channels: ?int, channel_layout: ?string, level: ?int, bits_per_raw_sample: ?string}>}
+     */
+    public function probeStreamStats(): array
+    {
         try {
             $url = $this->url_custom ?? $this->url;
+            if (empty($url)) {
+                return [];
+            }
+
             $process = new SymfonyProcess(['ffprobe', '-v', 'quiet', '-print_format', 'json', '-show_streams', $url]);
-            $process->setTimeout(10);
-            $output = '';
-            $errors = '';
-            $hasErrors = false;
-            $process->run(
-                function ($type, $buffer) use (&$output, &$hasErrors, &$errors) {
-                    if ($type === SymfonyProcess::OUT) {
-                        $output .= $buffer;
-                    }
-                    if ($type === SymfonyProcess::ERR) {
-                        $hasErrors = true;
-                        $errors .= $buffer;
-                    }
-                }
-            );
-            if ($hasErrors) {
-                Log::error("Error running ffprobe for channel \"{$this->title}\": {$errors}");
+            $process->setTimeout(15);
+            $process->run();
+
+            if ($process->getExitCode() !== 0) {
+                Log::error("Error running ffprobe for channel \"{$this->title}\": {$process->getErrorOutput()}");
 
                 return [];
             }
+
+            $output = $process->getOutput();
             $json = json_decode($output, true);
             if (isset($json['streams']) && is_array($json['streams'])) {
                 $streamStats = [];
@@ -297,6 +355,7 @@ class Channel extends Model
                             'codec_name' => $stream['codec_name'],
                             'codec_long_name' => $stream['codec_long_name'] ?? null,
                             'profile' => $stream['profile'] ?? null,
+                            'level' => $stream['level'] ?? null,
                             'width' => $stream['width'] ?? null,
                             'height' => $stream['height'] ?? null,
                             'bit_rate' => $stream['bit_rate'] ?? null,
@@ -305,12 +364,12 @@ class Channel extends Model
                             'sample_rate' => $stream['sample_rate'] ?? null,
                             'channels' => $stream['channels'] ?? null,
                             'channel_layout' => $stream['channel_layout'] ?? null,
+                            'bits_per_raw_sample' => $stream['bits_per_raw_sample'] ?? null,
+                            'refs' => $stream['refs'] ?? null,
+                            'tags' => $stream['tags'] ?? [],
                         ];
                     }
                 }
-
-                // Cache the result for 5 minutes
-                Cache::put("channel_stream_stats_{$this->id}", $streamStats, now()->addMinutes(5));
 
                 return $streamStats;
             }
@@ -319,6 +378,90 @@ class Channel extends Model
         }
 
         return [];
+    }
+
+    /**
+     * Build stream_stats in the format expected by emby-xtream (Dispatcharr-compatible).
+     *
+     * @return array{resolution: ?string, video_codec: ?string, video_profile: ?string, video_level: ?int, video_bit_depth: ?int, source_fps: ?float, ffmpeg_output_bitrate: ?float, audio_codec: ?string, audio_channels: ?string, sample_rate: ?int, audio_bitrate: ?float, audio_language: ?string}
+     */
+    public function getEmbyStreamStats(): array
+    {
+        $stats = $this->stream_stats;
+        if (empty($stats)) {
+            return [];
+        }
+
+        $video = null;
+        $audio = null;
+        foreach ($stats as $entry) {
+            $stream = $entry['stream'] ?? $entry;
+            if (($stream['codec_type'] ?? '') === 'video' && ! $video) {
+                $video = $stream;
+            }
+            if (($stream['codec_type'] ?? '') === 'audio' && ! $audio) {
+                $audio = $stream;
+            }
+        }
+
+        if (! $video && ! $audio) {
+            return [];
+        }
+
+        $result = [];
+
+        if ($video) {
+            $width = $video['width'] ?? null;
+            $height = $video['height'] ?? null;
+            $result['resolution'] = ($width && $height) ? "{$width}x{$height}" : null;
+            $result['video_codec'] = $video['codec_name'] ?? null;
+            $result['video_profile'] = $video['profile'] ?? null;
+            $result['video_level'] = isset($video['level']) ? (int) $video['level'] : null;
+            $result['video_bit_depth'] = isset($video['bits_per_raw_sample']) ? (int) $video['bits_per_raw_sample'] : 8;
+            $result['video_ref_frames'] = isset($video['refs']) ? (int) $video['refs'] : null;
+
+            // Parse frame rate from "25/1" or "30000/1001" format
+            $fps = $video['avg_frame_rate'] ?? null;
+            if ($fps && str_contains($fps, '/')) {
+                [$num, $den] = explode('/', $fps);
+                $result['source_fps'] = $den > 0 ? round((float) $num / (float) $den, 2) : null;
+            } else {
+                $result['source_fps'] = $fps ? (float) $fps : null;
+            }
+
+            // Convert bps to kbps
+            $bitRate = $video['bit_rate'] ?? null;
+            $result['ffmpeg_output_bitrate'] = $bitRate ? round((float) $bitRate / 1000, 1) : null;
+        }
+
+        if ($audio) {
+            $result['audio_codec'] = $audio['codec_name'] ?? null;
+
+            // Map channel count to layout string
+            $channels = $audio['channels'] ?? null;
+            if ($channels) {
+                $result['audio_channels'] = match ((int) $channels) {
+                    1 => 'mono',
+                    2 => 'stereo',
+                    6 => '5.1',
+                    8 => '7.1',
+                    default => (string) $channels,
+                };
+            } else {
+                $result['audio_channels'] = $audio['channel_layout'] ?? null;
+            }
+
+            $result['sample_rate'] = isset($audio['sample_rate']) ? (int) $audio['sample_rate'] : null;
+
+            // Convert bps to kbps
+            $audioBitRate = $audio['bit_rate'] ?? null;
+            $result['audio_bitrate'] = $audioBitRate ? round((float) $audioBitRate / 1000, 1) : null;
+
+            $tags = $audio['tags'] ?? [];
+            $result['audio_language'] = $tags['language'] ?? null;
+        }
+
+        return $result;
     }
 
     public function fetchMetadata($xtream = null, $refresh = false, bool $skipTmdb = false)
@@ -401,6 +544,29 @@ class Channel extends Model
         }
 
         return false;
+    }
+
+    public function getTmdbId(): ?string
+    {
+        return $this->info['tmdb_id']
+            ?? $this->info['tmdb']
+            ?? $this->movie_data['tmdb_id']
+            ?? $this->movie_data['tmdb']
+            ?? null;
+    }
+
+    public function getImdbId(): ?string
+    {
+        return $this->info['imdb_id']
+            ?? $this->info['imdb']
+            ?? $this->movie_data['imdb_id']
+            ?? $this->movie_data['imdb']
+            ?? null;
+    }
+
+    public function hasMovieId(): bool
+    {
+        return $this->getTmdbId() !== null || $this->getImdbId() !== null;
     }
 
     /**

@@ -181,7 +181,9 @@ class GeneralSettings extends Settings
     // VOD NFO file generation
     public ?bool $vod_stream_file_sync_generate_nfo = false;
 
-    // Video player proxy options
+    // Video player options
+    public ?int $max_concurrent_floating_players = null;
+
     public ?bool $force_video_player_proxy = false;
 
     // Resolve m3u-proxy public URL at request time when not explicitly configured
@@ -227,6 +229,25 @@ class GeneralSettings extends Settings
     public ?string $app_timezone = null;
 
     public ?string $date_format = null;
+
+    // Copilot / AI assistant settings
+    public ?bool $copilot_enabled = false;
+
+    public ?bool $copilot_mgmt_enabled = false;
+
+    public ?string $copilot_provider = null;
+
+    public ?string $copilot_model = null;
+
+    public ?string $copilot_api_key = null;
+
+    public ?string $copilot_url = null;
+
+    public ?string $copilot_system_prompt = null;
+
+    public ?array $copilot_global_tools = null;
+
+    public ?array $copilot_quick_actions = null;
 
     public static function group(): string
     {

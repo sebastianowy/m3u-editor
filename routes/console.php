@@ -1,5 +1,6 @@
 <?php
 
+use App\Models\PluginRun;
 use Illuminate\Support\Facades\Schedule;
 
 /*
@@ -36,7 +37,7 @@ Schedule::command('app:epg-cache-health-check')
 
 // Check backup
 Schedule::command('app:run-scheduled-backups')
-    ->everyMinute()
+    ->everyTwoMinutes()
     ->withoutOverlapping();
 
 // Cleanup logos
@@ -50,6 +51,10 @@ Schedule::command('queue:prune-failed --hours=48')
 
 // Prune old notifications
 Schedule::command('app:prune-old-notifications --days=7')
+    ->daily();
+
+// Prune old plugin run history (retention configured via PLUGIN_RUN_RETENTION_DAYS, default 7 days)
+Schedule::command('model:prune', ['--model' => [PluginRun::class]])
     ->daily();
 
 // Ensure m3u-proxy webhook is registered (handles proxy restarts, delayed startup, etc.)
@@ -66,5 +71,23 @@ Schedule::command('app:refresh-playlist-profiles')
 Schedule::command('networks:regenerate-schedules')
     ->hourly()
     ->withoutOverlapping();
+
+// Run scheduled plugin invocations
+Schedule::command('plugins:run-scheduled')
+    ->everyMinute()
+    ->withoutOverlapping();
+
+// Mark abandoned plugin runs stale so operators can resume them.
+Schedule::command('plugins:recover-stale-runs --minutes=15')
+    ->everyMinute()
+    ->withoutOverlapping();
+
+// Check for plugin updates from GitHub repositories
+if (config('plugins.update_check.enabled', true)) {
+    $updateFrequencyHours = max(1, (int) config('plugins.update_check.frequency_hours', 4));
+    Schedule::command('plugins:check-updates')
+        ->cron("0 */{$updateFrequencyHours} * * *")
+        ->withoutOverlapping();
+}
 
 // Note: HLS broadcast files are managed by m3u-proxy service

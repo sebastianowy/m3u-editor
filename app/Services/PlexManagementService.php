@@ -2,6 +2,7 @@
 
 namespace App\Services;
 
+use App\Facades\PlaylistFacade;
 use App\Models\MediaServerIntegration;
 use Exception;
 use Illuminate\Http\Client\PendingRequest;
@@ -84,6 +85,9 @@ class PlexManagementService
     /**
      * Get active sessions (currently streaming).
      *
+     * Checks both /status/sessions (regular + Live TV playback) and
+     * /transcode/sessions (active transcodes) for completeness.
+     *
      * @return array{success: bool, data?: Collection, message?: string}
      */
     public function getActiveSessions(): array
@@ -95,18 +99,49 @@ class PlexManagementService
                 return ['success' => false, 'message' => 'Failed to fetch sessions: '.$response->status()];
             }
 
-            $sessions = collect($response->json('MediaContainer.Metadata', []))
+            $container = $response->json('MediaContainer', []);
+
+            // Plex may nest sessions under 'Metadata', 'Video', or 'Track'
+            // depending on what is being played (movies, live tv, music).
+            $metadata = $container['Metadata']
+                ?? $container['Video']
+                ?? $container['Track']
+                ?? [];
+
+            $reportedSize = (int) ($container['size'] ?? 0);
+
+            if ($reportedSize > 0 && empty($metadata)) {
+                Log::warning('PlexManagementService: Plex reports sessions but no Metadata/Video/Track key found', [
+                    'integration_id' => $this->integration->id,
+                    'reported_size' => $reportedSize,
+                    'container_keys' => array_keys($container),
+                ]);
+            }
+
+            $sessions = collect($metadata)
                 ->map(fn (array $session) => [
                     'id' => $session['sessionKey'] ?? null,
-                    'title' => $session['title'] ?? 'Unknown',
+                    'title' => $session['title'] ?? $session['grandparentTitle'] ?? 'Unknown',
                     'type' => $session['type'] ?? 'unknown',
                     'user' => $session['User']['title'] ?? 'Unknown',
                     'player' => $session['Player']['title'] ?? 'Unknown',
-                    'state' => $session['Player']['state'] ?? 'unknown',
+                    'state' => $session['Player']['state'] ?? $session['Session']['location'] ?? 'unknown',
                     'progress' => $session['viewOffset'] ?? 0,
                     'duration' => $session['duration'] ?? 0,
                     'transcode' => ! empty($session['TranscodeSession']),
+                    'live' => ! empty($session['live']),
                 ]);
+
+            // Also merge in active transcode sessions that may not appear in /status/sessions
+            $transcodeSessions = $this->getTranscodeSessions();
+            if ($transcodeSessions->isNotEmpty()) {
+                $existingIds = $sessions->pluck('id')->filter()->all();
+                $transcodeSessions->each(function (array $ts) use ($sessions, $existingIds): void {
+                    if (! in_array($ts['id'], $existingIds, true)) {
+                        $sessions->push($ts);
+                    }
+                });
+            }
 
             return ['success' => true, 'data' => $sessions];
         } catch (Exception $e) {
@@ -116,6 +151,48 @@ class PlexManagementService
             ]);
 
             return ['success' => false, 'message' => $e->getMessage()];
+        }
+    }
+
+    /**
+     * Get active transcode sessions from Plex.
+     *
+     * These may include Live TV streams being transcoded that don't
+     * always appear in /status/sessions.
+     */
+    protected function getTranscodeSessions(): Collection
+    {
+        try {
+            $response = $this->client()->get('/transcode/sessions');
+
+            if (! $response->successful()) {
+                return collect();
+            }
+
+            $container = $response->json('MediaContainer', []);
+            $metadata = $container['Metadata'] ?? $container['TranscodeSession'] ?? [];
+
+            return collect($metadata)
+                ->filter(fn (array $session) => ! empty($session['sessionKey'] ?? $session['key'] ?? null))
+                ->map(fn (array $session) => [
+                    'id' => $session['sessionKey'] ?? $session['key'] ?? null,
+                    'title' => $session['title'] ?? $session['grandparentTitle'] ?? 'Transcoding',
+                    'type' => $session['type'] ?? 'transcode',
+                    'user' => $session['User']['title'] ?? 'Unknown',
+                    'player' => $session['Player']['title'] ?? 'Unknown',
+                    'state' => $session['Player']['state'] ?? 'transcoding',
+                    'progress' => $session['viewOffset'] ?? 0,
+                    'duration' => $session['duration'] ?? 0,
+                    'transcode' => true,
+                    'live' => ! empty($session['live']),
+                ]);
+        } catch (Exception $e) {
+            Log::debug('PlexManagementService: Failed to get transcode sessions', [
+                'integration_id' => $this->integration->id,
+                'error' => $e->getMessage(),
+            ]);
+
+            return collect();
         }
     }
 
@@ -327,6 +404,52 @@ class PlexManagementService
     }
 
     /**
+     * Resolve the canonical playlist URLs used across the application.
+     *
+     * @return array{hdhr: string, epg: string}|null Returns null when the playlist cannot be found.
+     */
+    protected function resolvePlaylistUrls(string $playlistUuid): ?array
+    {
+        $playlist = PlaylistFacade::resolvePlaylistByUuid($playlistUuid);
+
+        if (! $playlist) {
+            return null;
+        }
+
+        return PlaylistFacade::getUrls($playlist);
+    }
+
+    /**
+     * Fetch discover.json from the same HDHR base URL we register in Plex.
+     *
+     * @return array{success: bool, data?: array, message?: string}
+     */
+    public function fetchDiscoverPayload(string $hdhrBaseUrl): array
+    {
+        try {
+            $discoverUrl = rtrim($hdhrBaseUrl, '/').'/discover.json';
+            $response = Http::timeout(10)->get($discoverUrl);
+
+            if ($response->successful()) {
+                return [
+                    'success' => true,
+                    'data' => $response->json() ?? [],
+                ];
+            }
+
+            return [
+                'success' => false,
+                'message' => "Could not reach HDHR discover.json (HTTP {$response->status()}) at {$discoverUrl}.",
+            ];
+        } catch (Exception $e) {
+            return [
+                'success' => false,
+                'message' => 'Could not reach HDHR discover.json: '.$e->getMessage(),
+            ];
+        }
+    }
+
+    /**
      * Register an m3u-editor playlist's HDHR endpoint as a DVR tuner in Plex.
      *
      * Follows the correct Plex DVR API flow (as implemented by Headendarr):
@@ -345,21 +468,16 @@ class PlexManagementService
     {
         try {
             // Step 1: Fetch discover.json to get device info (DeviceID, DeviceAuth, etc.)
-            // The hdhrBaseUrl is the external URL for Plex. We build a local URL
-            // to fetch discover.json from ourselves since we host the HDHR endpoint.
-            $parsedHdhr = parse_url($hdhrBaseUrl);
-            $hdhrPath = $parsedHdhr['path'] ?? '';
-            $appPort = config('app.port', 36400);
-            $localDiscoverUrl = "http://localhost:{$appPort}".rtrim($hdhrPath, '/').'/discover.json';
-
-            $discoverResponse = Http::timeout(10)->get($localDiscoverUrl);
-            if (! $discoverResponse->successful()) {
+            // Use the exact HDHR URL that will be registered in Plex so this
+            // follows the same public URL path used elsewhere in the app.
+            $discoverResult = $this->fetchDiscoverPayload($hdhrBaseUrl);
+            if (! $discoverResult['success']) {
                 return [
                     'success' => false,
-                    'message' => "Could not reach HDHR discover.json (HTTP {$discoverResponse->status()}). Ensure the HDHR endpoint is available.",
+                    'message' => $discoverResult['message'],
                 ];
             }
-            $discoverPayload = $discoverResponse->json() ?? [];
+            $discoverPayload = $discoverResult['data'] ?? [];
 
             // Step 2: Create the device in Plex
             $created = $this->tryCreateDevice($hdhrBaseUrl, $discoverPayload);
@@ -411,6 +529,33 @@ class PlexManagementService
 
             // Step 4: Check for existing DVR or create a new one
             $dvrKey = $targetDevice['parentID'] ?? null;
+
+            // Also check if we already have a DVR stored locally
+            if (! $dvrKey && $this->integration->plex_dvr_id) {
+                // Verify the stored DVR still exists in Plex
+                if ($this->verifyDvrExists($this->integration->plex_dvr_id)) {
+                    $dvrKey = $this->integration->plex_dvr_id;
+                }
+            }
+
+            // Search all existing DVRs in Plex for one that already has our specific device
+            // (matched by device key or UUID — NOT by URI pattern, to avoid hijacking real HDHR devices)
+            if (! $dvrKey && $deviceKey) {
+                try {
+                    $existingDvrsResponse = $this->client()->get('/livetv/dvrs');
+                    $existingDvrs = $existingDvrsResponse->json('MediaContainer.Dvr', []);
+                    foreach ($existingDvrs as $dvr) {
+                        foreach ($dvr['Device'] ?? [] as $dvrDevice) {
+                            if (($dvrDevice['key'] ?? '') === $deviceKey || ($dvrDevice['uuid'] ?? '') === $deviceUuid) {
+                                $dvrKey = $dvr['key'] ?? null;
+                                break 2;
+                            }
+                        }
+                    }
+                } catch (Exception) {
+                    // Non-critical: proceed with creating a new DVR
+                }
+            }
 
             if (! $dvrKey) {
                 // No existing DVR — create one
@@ -474,7 +619,11 @@ class PlexManagementService
                 ]);
             }
 
-            // Sync channel map immediately after registration
+            // Sync channel map after registration.
+            // Plex needs time to download and parse the XMLTV guide after
+            // the DVR/lineup is created — without this wait the lineup
+            // channels endpoint returns empty or stale data.
+            sleep(8);
             $syncResult = $this->syncDvrChannelsForTuner($deviceKey, $playlistUuid);
             $channelInfo = $syncResult['success'] ? " ({$syncResult['mapped_channels']} channels mapped)" : '';
 
@@ -584,11 +733,8 @@ class PlexManagementService
     }
 
     /**
-     * Ensure EPG guide auto-refresh is enabled in DVR preferences.
-     *
-     * Plex manages EPG refresh internally via the butler scheduler.
-     * There is no manual trigger endpoint — we configure the DVR prefs
-     * to enable the refresh task and set the desired interval.
+     * Refresh EPG guides: ensure auto-refresh is enabled and trigger an
+     * immediate re-fetch so Plex picks up changed channel IDs / programmes.
      */
     public function refreshGuides(): array
     {
@@ -608,11 +754,18 @@ class PlexManagementService
                 'success' => $prefsResult['success'],
             ]);
 
-            if ($prefsResult['success']) {
-                return ['success' => true, 'message' => 'EPG auto-refresh enabled (every 12 hours). Plex will re-fetch the guide data on its next scheduled run.'];
+            if (! $prefsResult['success']) {
+                return $prefsResult;
             }
 
-            return $prefsResult;
+            // Trigger an immediate EPG refresh via butler task
+            try {
+                $this->client()->withBody('')->post('/butler/RefreshEPGGuides');
+            } catch (Exception) {
+                // Non-critical: will refresh on next scheduled cycle
+            }
+
+            return ['success' => true, 'message' => 'EPG guide refresh triggered. Plex will re-fetch the guide data shortly.'];
         } catch (Exception $e) {
             Log::error('PlexManagementService: refreshGuides exception', ['error' => $e->getMessage()]);
 
@@ -628,19 +781,19 @@ class PlexManagementService
         try {
             $response = $this->client()->delete("/livetv/dvrs/{$dvrId}");
 
-            if ($response->successful()) {
-                // Clear stored DVR ID if it matches
-                if ((string) $this->integration->plex_dvr_id === $dvrId) {
-                    $this->integration->update([
-                        'plex_dvr_id' => null,
-                        'plex_dvr_tuners' => null,
-                    ]);
-                }
+            // Treat 404 as success — DVR was already deleted in Plex
+            $deleted = $response->successful() || $response->status() === 404;
+
+            if ($deleted && (string) $this->integration->plex_dvr_id === $dvrId) {
+                $this->integration->update([
+                    'plex_dvr_id' => null,
+                    'plex_dvr_tuners' => null,
+                ]);
             }
 
             return [
-                'success' => $response->successful(),
-                'message' => $response->successful() ? 'DVR removed from Plex' : 'Failed: '.$response->status(),
+                'success' => $deleted,
+                'message' => $deleted ? 'DVR removed from Plex' : 'Failed: '.$response->status(),
             ];
         } catch (Exception $e) {
             return ['success' => false, 'message' => $e->getMessage()];
@@ -649,24 +802,58 @@ class PlexManagementService
 
     /**
      * Get channel lineup for a specific DVR.
+     *
+     * Fetches the DVR detail and extracts ChannelMapping entries from each Device.
+     * The /livetv/dvrs/{id}/channels endpoint is unreliable (often returns 404),
+     * so we use the DVR detail endpoint which always includes device channel mappings.
      */
     public function getDvrChannels(string $dvrId): array
     {
         try {
-            $response = $this->client()->get("/livetv/dvrs/{$dvrId}/channels");
+            $response = $this->client()->get("/livetv/dvrs/{$dvrId}");
 
-            if (! $response->successful()) {
-                return ['success' => false, 'message' => 'Failed to fetch channels: '.$response->status()];
+            if ($response->status() === 404) {
+                return ['success' => true, 'data' => collect()];
             }
 
-            $channels = collect($response->json('MediaContainer.Metadata', []))
-                ->map(fn (array $ch) => [
-                    'id' => $ch['ratingKey'] ?? null,
-                    'title' => $ch['title'] ?? 'Unknown',
-                    'number' => $ch['index'] ?? null,
-                    'enabled' => ($ch['enabled'] ?? true) !== false,
-                    'thumb' => $ch['thumb'] ?? null,
-                ]);
+            if (! $response->successful()) {
+                return ['success' => false, 'message' => 'Failed to fetch DVR details: '.$response->status()];
+            }
+
+            $dvr = $response->json('MediaContainer.Dvr.0') ?? $response->json('MediaContainer.Dvr') ?? [];
+
+            // Handle single DVR object (not wrapped in array)
+            if (isset($dvr['key'])) {
+                $dvr = $dvr;
+            } elseif (is_array($dvr) && ! empty($dvr) && isset($dvr[0])) {
+                $dvr = $dvr[0];
+            }
+
+            $devices = $dvr['Device'] ?? [];
+            if (! is_array($devices) || (! empty($devices) && ! array_is_list($devices))) {
+                $devices = [$devices];
+            }
+
+            $channels = collect();
+            foreach ($devices as $device) {
+                $mappings = $device['ChannelMapping'] ?? [];
+                if (! is_array($mappings) || (! empty($mappings) && ! array_is_list($mappings))) {
+                    $mappings = [$mappings];
+                }
+
+                foreach ($mappings as $mapping) {
+                    if (! is_array($mapping)) {
+                        continue;
+                    }
+                    $channels->push([
+                        'id' => $mapping['channelKey'] ?? null,
+                        'number' => $mapping['channelKey'] ?? null,
+                        'device_identifier' => $mapping['deviceIdentifier'] ?? null,
+                        'lineup_identifier' => $mapping['lineupIdentifier'] ?? null,
+                        'enabled' => ! in_array(trim($mapping['enabled'] ?? '1'), ['0', 'false']),
+                    ]);
+                }
+            }
 
             return ['success' => true, 'data' => $channels];
         } catch (Exception $e) {
@@ -897,6 +1084,30 @@ class PlexManagementService
             return ['success' => false, 'message' => 'DVR not fully configured. Register a DVR tuner first.'];
         }
 
+        // Verify the DVR still exists in Plex before syncing
+        if (! $this->verifyDvrExists($dvrId)) {
+            return ['success' => false, 'message' => 'DVR no longer exists in Plex. Local state has been cleaned up. Please re-register the DVR tuner.'];
+        }
+
+        // Trigger EPG refresh FIRST so Plex re-fetches the XMLTV guide before we
+        // try to match HDHR channels to lineup channels.  Without this, Plex may
+        // still have stale guide data (e.g. old channel IDs from before a recount)
+        // and the channel map will reference non-existent lineup entries.
+        $epgRefreshed = false;
+        try {
+            $response = $this->client()->withBody('')->post('/butler/RefreshEPGGuides');
+            $epgRefreshed = $response->successful();
+        } catch (Exception) {
+            // Non-critical: will proceed with possibly stale guide data
+        }
+
+        // Give Plex time to re-download and parse the XMLTV guide.
+        // The butler task is async — without this delay, lineup channels
+        // would still reflect the old guide content.
+        if ($epgRefreshed) {
+            sleep(8);
+        }
+
         $totalMapped = 0;
         $anyChanged = false;
         $errors = [];
@@ -926,15 +1137,8 @@ class PlexManagementService
             ? "{$totalMapped} channels synced across {$tunerCount} tuner(s)"
             : "{$totalMapped} channels in sync across {$tunerCount} tuner(s)";
 
-        // Trigger EPG refresh after channel sync so Plex re-fetches the guide
-        // and discovers lineup identifiers for newly added channels
-        if ($anyChanged) {
-            try {
-                $this->client()->withBody('')->post('/butler/RefreshEPGGuides');
-                $message .= ' — EPG refresh triggered';
-            } catch (Exception) {
-                // Non-critical: EPG will refresh on next scheduled cycle
-            }
+        if ($epgRefreshed) {
+            $message .= ' — EPG refresh triggered';
         }
 
         return [
@@ -946,6 +1150,80 @@ class PlexManagementService
     }
 
     /**
+     * Verify that the stored DVR still exists in Plex.
+     *
+     * If it doesn't, clean up the stale local state and return false.
+     */
+    protected function verifyDvrExists(string $dvrId): bool
+    {
+        try {
+            $response = $this->client()->get('/livetv/dvrs');
+            if (! $response->successful()) {
+                return true; // Assume it exists if we can't check
+            }
+
+            $dvrs = $response->json('MediaContainer.Dvr', []);
+            foreach ($dvrs as $dvr) {
+                if ((string) ($dvr['key'] ?? '') === $dvrId) {
+                    return true;
+                }
+            }
+
+            // DVR not found — clean up local state
+            Log::warning('PlexManagementService: DVR no longer exists in Plex, cleaning up', [
+                'integration_id' => $this->integration->id,
+                'dvr_id' => $dvrId,
+            ]);
+
+            $this->integration->update([
+                'plex_dvr_id' => null,
+                'plex_dvr_tuners' => null,
+            ]);
+
+            return false;
+        } catch (Exception $e) {
+            return true; // Assume it exists on network errors
+        }
+    }
+
+    /**
+     * Force Plex to re-scan the HDHR lineup device so it discovers
+     * updated channel numbers and guide data.
+     *
+     * @return bool Whether the refresh was successful
+     */
+    protected function refreshLineupDevice(string $deviceKey): bool
+    {
+        try {
+            // Trigger a channel scan on the device — Plex will re-fetch lineup.json
+            $response = $this->client()->withBody('')->post(
+                "/media/grabbers/devices/{$deviceKey}/scan"
+            );
+
+            if ($response->successful()) {
+                return true;
+            }
+
+            // Fallback: try refreshing via the DVR scan endpoint
+            $dvrId = $this->integration->plex_dvr_id;
+            if ($dvrId) {
+                $response = $this->client()->withBody('')->post("/livetv/dvrs/{$dvrId}/scan");
+
+                return $response->successful();
+            }
+
+            return false;
+        } catch (Exception $e) {
+            Log::debug('PlexManagementService: Lineup device refresh failed (non-critical)', [
+                'device_key' => $deviceKey,
+                'error' => $e->getMessage(),
+            ]);
+
+            return false;
+        }
+    }
+
+    /**
      * Sync the channel map for a single tuner (device + playlist).
      *
      * @return array{success: bool, message: string, mapped_channels?: int, changed?: bool}
@@ -953,9 +1231,13 @@ class PlexManagementService
     public function syncDvrChannelsForTuner(string $deviceKey, string $playlistUuid): array
     {
         try {
+            $urls = $this->resolvePlaylistUrls($playlistUuid);
+            if (! $urls || empty($urls['hdhr'])) {
+                return ['success' => false, 'message' => 'Could not resolve playlist HDHR URL.'];
+            }
+
             // Fetch current HDHR lineup from our own endpoint
-            $appPort = config('app.port', 36400);
-            $lineupUrl = "http://localhost:{$appPort}/{$playlistUuid}/hdhr/lineup.json";
+            $lineupUrl = rtrim($urls['hdhr'], '/').'/lineup.json';
             $lineupResponse = Http::timeout(15)->get($lineupUrl);
 
             if (! $lineupResponse->successful()) {
@@ -972,13 +1254,25 @@ class PlexManagementService
 
             if (! $lineupId) {
                 // Fallback: rebuild from our known URL
-                $epgUrl = $this->buildExternalUrl($playlistUuid, 'epg.xml');
+                $epgUrl = $urls['epg'] ?? null;
+                if (! $epgUrl) {
+                    return ['success' => false, 'message' => 'Could not resolve playlist EPG URL.'];
+                }
                 $lineupId = $this->buildLineupId($epgUrl);
                 Log::warning('PlexManagementService: Could not get lineup ID from DVR, using fallback', [
                     'integration_id' => $this->integration->id,
                     'fallback_lineup_id' => $lineupId,
                 ]);
             }
+
+            // Force Plex to re-scan the HDHR device so it picks up channel number changes.
+            // Without this, Plex's lineup channels endpoint returns stale data and
+            // EPG-to-channel mapping breaks when numbers are reassigned.
+            $this->refreshLineupDevice($deviceKey);
+
+            // Give Plex a moment to process the device scan before fetching lineup channels.
+            // The scan endpoint is async — without this delay, Plex returns stale/empty data.
+            sleep(3);
 
             // Fetch Plex's current knowledge of the lineup channels
             $lineupChannelsResponse = $this->client()->get('/livetv/epg/lineupchannels', [
@@ -1003,7 +1297,9 @@ class PlexManagementService
                 'integration_id' => $this->integration->id,
                 'lineup_id' => $lineupId,
                 'media_container_keys' => array_keys($lineupChannelsPayload),
-                'channel_count' => is_array($lineupChannelsPayload['Channel'] ?? null) ? count($lineupChannelsPayload['Channel']) : 0,
+                'channel_count' => is_array($lineupChannelsPayload['Lineup'] ?? $lineupChannelsPayload['Channel'] ?? null)
+                    ? count($lineupChannelsPayload['Lineup'] ?? $lineupChannelsPayload['Channel'] ?? [])
+                    : 0,
             ]);
             $channelMapPayload = $this->buildChannelMapPayload($hdhrLineup, $lineupChannelsPayload);
 
@@ -1094,7 +1390,14 @@ class PlexManagementService
         try {
             $dvrId = $this->integration->plex_dvr_id;
             if (! $dvrId) {
-                return ['success' => false, 'message' => 'No DVR registered'];
+                // No DVR registered — just clean up local tuner state
+                $tuners = $this->integration->plex_dvr_tuners ?? [];
+                $remainingTuners = array_values(array_filter($tuners, fn (array $t): bool => ($t['device_key'] ?? '') !== $deviceKey));
+                $this->integration->update([
+                    'plex_dvr_tuners' => $remainingTuners ?: null,
+                ]);
+
+                return ['success' => true, 'message' => 'Tuner reference removed (no DVR registered in Plex).'];
             }
 
             $tuners = $this->integration->plex_dvr_tuners ?? [];
@@ -1105,8 +1408,15 @@ class PlexManagementService
                 return $this->removeDvr($dvrId);
             }
 
-            // Remove device from DVR
-            $this->client()->delete("/livetv/dvrs/{$dvrId}/devices/{$deviceKey}");
+            // Remove device from DVR (ignore 404 — device may already be gone)
+            $response = $this->client()->delete("/livetv/dvrs/{$dvrId}/devices/{$deviceKey}");
+            if (! $response->successful() && $response->status() !== 404) {
+                Log::warning('PlexManagementService: Device removal returned unexpected status', [
+                    'integration_id' => $this->integration->id,
+                    'device_key' => $deviceKey,
+                    'status' => $response->status(),
+                ]);
+            }
 
             $this->integration->update([
                 'plex_dvr_tuners' => $remainingTuners,
@@ -1125,23 +1435,6 @@ class PlexManagementService
 
             return ['success' => false, 'message' => $e->getMessage()];
         }
-    }
-
-    /**
-     * Build an external URL for HDHR/EPG endpoints.
-     * Uses app.url with scheme handling.
-     */
-    protected function buildExternalUrl(string $playlistUuid, string $suffix): string
-    {
-        $appUrl = rtrim(config('app.url'), '/');
-        if (! parse_url($appUrl, PHP_URL_SCHEME)) {
-            $appUrl = 'http://'.$appUrl;
-        }
-        $scheme = parse_url($appUrl, PHP_URL_SCHEME) ?: 'http';
-        $host = parse_url($appUrl, PHP_URL_HOST) ?: 'localhost';
-        $port = parse_url($appUrl, PHP_URL_PORT) ?: config('app.port', 36400);
-
-        return "{$scheme}://{$host}:{$port}/{$playlistUuid}/{$suffix}";
     }
 
     /**
@@ -1239,28 +1532,81 @@ class PlexManagementService
     }
 
     /**
+     * Extract channel entries from Plex's lineup channels response.
+     *
+     * Plex returns a nested structure: MediaContainer.Lineup[].Channel[]
+     * where Lineup is an array of lineup objects (usually 1), each containing
+     * a Channel array with the actual channel data.
+     *
+     * @return list<array>
+     */
+    protected function extractLineupChannels(array $lineupChannelsPayload): array
+    {
+        $lineups = $lineupChannelsPayload['Lineup'] ?? [];
+
+        // Not an array at all
+        if (! is_array($lineups)) {
+            return [];
+        }
+
+        // If empty, try flat "Channel" key fallback (older Plex versions)
+        if (empty($lineups)) {
+            $flat = $lineupChannelsPayload['Channel'] ?? [];
+
+            return is_array($flat) ? (array_is_list($flat) ? $flat : [$flat]) : [];
+        }
+
+        // Wrap single associative lineup object in a list
+        if (! array_is_list($lineups)) {
+            $lineups = [$lineups];
+        }
+
+        // Collect all Channel entries from each lineup object
+        $allChannels = [];
+        foreach ($lineups as $lineup) {
+            if (! is_array($lineup)) {
+                continue;
+            }
+            $channels = $lineup['Channel'] ?? [];
+            if (! is_array($channels)) {
+                continue;
+            }
+            if (! empty($channels) && ! array_is_list($channels)) {
+                $channels = [$channels];
+            }
+            foreach ($channels as $ch) {
+                if (is_array($ch)) {
+                    $allChannels[] = $ch;
+                }
+            }
+        }
+
+        return $allChannels;
+    }
+
+    /**
      * Build the channel map payload for Plex from HDHR lineup and Plex lineup channels.
      *
      * @return array{payload: array, enabledIds: list<string>, unmatched: list<string>}
      */
     protected function buildChannelMapPayload(array $hdhrLineup, array $lineupChannelsPayload): array
     {
-        // Build a number→identifier map from Plex's lineup channels.
-        // Plex returns channels under "Channel" key with "number" and "lineupIdentifier" fields.
-        // Handle single-channel responses: Plex may return a single object instead of an array.
-        $channels = $lineupChannelsPayload['Channel'] ?? [];
-        if (is_array($channels) && ! empty($channels) && ! array_is_list($channels)) {
-            // Single channel returned as an associative array — wrap it in a list
-            $channels = [$channels];
-        }
+        // Extract channels from Plex's nested lineup response structure
+        $channels = $this->extractLineupChannels($lineupChannelsPayload);
 
         $numberMap = [];
-        foreach ($channels as $channel) {
+        foreach ($channels as $idx => $channel) {
             if (! is_array($channel)) {
                 continue;
             }
-            $number = trim((string) ($channel['number'] ?? $channel['channelNumber'] ?? $channel['channel'] ?? ''));
-            $identifier = trim((string) ($channel['lineupIdentifier'] ?? $channel['id'] ?? $channel['channelIdentifier'] ?? $channel['key'] ?? ''));
+            if ($idx === 0) {
+                Log::debug('PlexManagementService: First Lineup channel keys', [
+                    'keys' => array_keys($channel),
+                ]);
+            }
+            // Plex lineup channels use: identifier (lineup ID), channelVcn (visible channel number)
+            $number = trim((string) ($channel['channelVcn'] ?? $channel['Number'] ?? $channel['number'] ?? ''));
+            $identifier = trim((string) ($channel['identifier'] ?? $channel['lineupIdentifier'] ?? $channel['Id'] ?? $channel['id'] ?? ''));
             if ($number && $identifier) {
                 $numberMap[$number] = $identifier;
             }
@@ -1269,6 +1615,7 @@ class PlexManagementService
         $enabledIds = [];
         $unmatched = [];
         $seen = [];
+        $matched = 0;
 
         foreach ($hdhrLineup as $channel) {
             if (! is_array($channel)) {
@@ -1279,12 +1626,33 @@ class PlexManagementService
                 continue;
             }
 
-            $matchedId = $numberMap[$guideNumber] ?? $guideNumber;
+            if (isset($numberMap[$guideNumber])) {
+                $matchedId = $numberMap[$guideNumber];
+                $matched++;
+            } else {
+                $matchedId = $guideNumber;
+                $unmatched[] = $guideNumber;
+            }
+
             if (isset($seen[$matchedId])) {
                 continue;
             }
             $seen[$matchedId] = true;
             $enabledIds[] = (string) $matchedId;
+        }
+
+        // Warn when HDHR channel numbers don't match Plex's lineup channels.
+        // This usually means Plex has stale XMLTV guide data and needs an EPG refresh.
+        if (! empty($unmatched) && ! empty($numberMap)) {
+            $plexSample = array_slice(array_keys($numberMap), 0, 5);
+            $hdhrSample = array_slice($unmatched, 0, 5);
+            Log::warning('PlexManagementService: HDHR/lineup channel number mismatch — Plex may have stale EPG guide data', [
+                'integration_id' => $this->integration->id,
+                'matched' => $matched,
+                'unmatched' => count($unmatched),
+                'plex_lineup_numbers_sample' => $plexSample,
+                'hdhr_unmatched_numbers_sample' => $hdhrSample,
+            ]);
         }
 
         $payload = ['channelsEnabled' => implode(',', $enabledIds)];
@@ -1305,6 +1673,175 @@ class PlexManagementService
             'enabledIds' => $enabledIds,
             'unmatched' => $unmatched,
         ];
+    }
+
+    /**
+     * Verify the DVR sync status: channel count, EPG mapping, and overall health.
+     *
+     * Returns a structured report indicating whether all tuners are in sync
+     * and EPG data is correctly mapped to channels.
+     *
+     * @return array{success: bool, data?: array{status: string, tuners: list<array{playlist: string, channels_hdhr: int, channels_plex: int, epg_mapped: int, epg_missing: int, in_sync: bool}>, summary: string}, message?: string}
+     */
+    public function verifyDvrSync(): array
+    {
+        $dvrId = $this->integration->plex_dvr_id;
+        $tuners = $this->integration->plex_dvr_tuners ?? [];
+
+        if (! $dvrId || empty($tuners)) {
+            return ['success' => true, 'data' => [
+                'status' => 'not_configured',
+                'tuners' => [],
+                'summary' => 'No DVR tuner registered yet.',
+            ]];
+        }
+
+        if (! $this->verifyDvrExists($dvrId)) {
+            return ['success' => true, 'data' => [
+                'status' => 'error',
+                'tuners' => [],
+                'summary' => 'DVR no longer exists in Plex. Please re-register the tuner.',
+            ]];
+        }
+
+        $lineupId = $this->getDvrLineupId();
+
+        // Fetch Plex DVR channels (from Device[].ChannelMapping[])
+        $plexChannelsResult = $this->getDvrChannels($dvrId);
+        $plexChannels = $plexChannelsResult['success'] ? $plexChannelsResult['data'] : collect();
+        $plexChannelNumbers = $plexChannels
+            ->filter(fn (array $ch) => $ch['enabled'])
+            ->pluck('number')
+            ->filter()
+            ->map(fn ($n) => (string) $n)
+            ->values()
+            ->all();
+
+        // Fetch Plex lineup channels (for EPG mapping verification)
+        $lineupChannelNumbers = [];
+        if ($lineupId) {
+            try {
+                $lineupResponse = $this->client()->get('/livetv/epg/lineupchannels', ['lineup' => $lineupId]);
+                if ($lineupResponse->successful()) {
+                    $container = $lineupResponse->json('MediaContainer', []);
+                    $channels = $this->extractLineupChannels($container);
+                    foreach ($channels as $ch) {
+                        if (! is_array($ch)) {
+                            continue;
+                        }
+                        $num = trim((string) ($ch['channelVcn'] ?? $ch['Number'] ?? $ch['number'] ?? ''));
+                        if ($num) {
+                            $lineupChannelNumbers[] = $num;
+                        }
+                    }
+                }
+            } catch (Exception) {
+                // Non-critical
+            }
+        }
+
+        $tunerReports = [];
+        $allInSync = true;
+
+        foreach ($tuners as $tuner) {
+            $playlistUuid = $tuner['playlist_uuid'] ?? null;
+            $deviceKey = $tuner['device_key'] ?? null;
+            if (! $playlistUuid) {
+                continue;
+            }
+
+            $urls = $this->resolvePlaylistUrls($playlistUuid);
+            if (! $urls || empty($urls['hdhr'])) {
+                $allInSync = false;
+                $tunerReports[] = [
+                    'playlist' => $playlistUuid,
+                    'channels_hdhr' => 0,
+                    'channels_plex' => 0,
+                    'epg_mapped' => 0,
+                    'epg_missing' => 0,
+                    'in_sync' => false,
+                ];
+
+                continue;
+            }
+
+            // Fetch HDHR lineup for this tuner
+            $lineupUrl = rtrim($urls['hdhr'], '/').'/lineup.json';
+            $hdhrChannelCount = 0;
+            $hdhrNumbers = [];
+            try {
+                $lineupResponse = Http::timeout(10)->get($lineupUrl);
+                if ($lineupResponse->successful()) {
+                    $lineup = $lineupResponse->json();
+                    if (is_array($lineup)) {
+                        $hdhrChannelCount = count($lineup);
+                        foreach ($lineup as $ch) {
+                            $num = trim((string) ($ch['GuideNumber'] ?? $ch['channel_number'] ?? ''));
+                            if ($num) {
+                                $hdhrNumbers[] = $num;
+                            }
+                        }
+                    }
+                }
+            } catch (Exception) {
+                // Non-critical
+            }
+
+            // Check how many HDHR channels appear in Plex DVR
+            $channelsInPlex = count(array_intersect($hdhrNumbers, $plexChannelNumbers));
+
+            // Check how many channels have EPG lineup entries
+            $epgMapped = count(array_intersect($hdhrNumbers, $lineupChannelNumbers));
+            $epgMissing = count($hdhrNumbers) - $epgMapped;
+
+            $inSync = $channelsInPlex === $hdhrChannelCount && $epgMissing === 0 && $hdhrChannelCount > 0;
+            if (! $inSync) {
+                $allInSync = false;
+            }
+
+            $tunerReports[] = [
+                'playlist_uuid' => $playlistUuid,
+                'device_key' => $deviceKey,
+                'channels_hdhr' => $hdhrChannelCount,
+                'channels_plex' => $channelsInPlex,
+                'epg_mapped' => $epgMapped,
+                'epg_missing' => $epgMissing,
+                'in_sync' => $inSync,
+            ];
+        }
+
+        $totalHdhr = array_sum(array_column($tunerReports, 'channels_hdhr'));
+        $totalPlex = array_sum(array_column($tunerReports, 'channels_plex'));
+        $totalEpgMapped = array_sum(array_column($tunerReports, 'epg_mapped'));
+        $totalEpgMissing = array_sum(array_column($tunerReports, 'epg_missing'));
+
+        if ($totalHdhr === 0) {
+            $summary = 'No channels found in HDHR lineup. Check your playlist configuration.';
+            $status = 'warning';
+        } elseif ($allInSync) {
+            $summary = "All {$totalHdhr} channels synchronized and EPG mapped correctly.";
+            $status = 'ok';
+        } else {
+            $parts = [];
+            if ($totalPlex < $totalHdhr) {
+                $parts[] = ($totalHdhr - $totalPlex).' channel(s) not yet in Plex';
+            }
+            if ($totalEpgMissing > 0) {
+                $parts[] = "{$totalEpgMissing} channel(s) missing EPG mapping";
+            }
+            $summary = implode('; ', $parts).'. Try "Force Sync Channels" to fix.';
+            $status = 'warning';
+        }
+
+        return ['success' => true, 'data' => [
+            'status' => $status,
+            'tuners' => $tunerReports,
+            'total_channels' => $totalHdhr,
+            'total_in_plex' => $totalPlex,
+            'total_epg_mapped' => $totalEpgMapped,
+            'total_epg_missing' => $totalEpgMissing,
+            'summary' => $summary,
+        ]];
     }
 
     /**
